@@ -1,0 +1,384 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum CompanyType {
+  BUYER
+  SUPPLIER
+  TRADER
+  LOGISTICS
+  BROKER
+  OTHER
+}
+
+enum CompanyStatus {
+  ACTIVE
+  INACTIVE
+  TO_VERIFY
+}
+
+enum LeadType {
+  BUY
+  SELL
+  INQUIRY
+  OFFER
+}
+
+enum LeadPriority {
+  HIGH
+  MEDIUM
+  LOW
+}
+
+enum LeadStatus {
+  NEW
+  VERIFIED
+  CONTACTED
+  NEGOTIATING
+  CLOSED
+  DEAD
+}
+
+enum DealStage {
+  DRAFT
+  ACTIVE
+  NEGOTIATING
+  WON
+  LOST
+  COMPLETED
+}
+
+enum ActivityType {
+  CALL
+  WHATSAPP
+  EMAIL
+  MEETING
+  NOTE
+  TASK
+}
+
+enum SearchJobStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  CANCELED
+}
+
+enum SourceRunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  BLOCKED
+  SKIPPED
+}
+
+enum RawMarketLeadStatus {
+  PENDING_REVIEW
+  IMPORTED
+  REJECTED
+}
+
+model Company {
+  id          String        @id @default(cuid())
+  name        String
+  companyType CompanyType
+  country     String
+  city        String
+  website     String?
+  description String?
+  source      String?
+  status      CompanyStatus @default(TO_VERIFY)
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  contacts    Contact[]
+  leads       Lead[]
+  sellerDeals Deal[]        @relation("SellerCompany")
+  buyerDeals  Deal[]        @relation("BuyerCompany")
+  activities  Activity[]
+
+  @@index([name])
+  @@index([country])
+  @@index([companyType])
+  @@index([status])
+}
+
+model Contact {
+  id        String   @id @default(cuid())
+  companyId String
+  fullName  String
+  position  String?
+  email     String?
+  phone     String?
+  whatsapp  String?
+  telegram  String?
+  notes     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company    Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  activities Activity[]
+
+  @@index([companyId])
+  @@index([fullName])
+  @@index([email])
+}
+
+model Product {
+  id        String   @id @default(cuid())
+  name      String
+  category  String
+  synonyms  String[] @default([])
+  hsCode    String?
+  specsJson Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  leads Lead[]
+  deals Deal[]
+
+  @@unique([name])
+  @@index([category])
+  @@index([hsCode])
+}
+
+model Lead {
+  id                 String       @id @default(cuid())
+  title              String
+  productId          String
+  companyId          String?
+  leadType           LeadType
+  volume             Decimal?     @db.Decimal(18, 4)
+  unit               String?
+  price              Decimal?     @db.Decimal(18, 4)
+  currency           String?
+  incoterms          String?
+  originCountry      String?
+  destinationCountry String?
+  sourceName         String
+  sourceUrl          String?
+  rawText            String
+  aiSummary          String?
+  priority           LeadPriority @default(MEDIUM)
+  status             LeadStatus   @default(NEW)
+  publishedAt        DateTime?
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+
+  product    Product    @relation(fields: [productId], references: [id], onDelete: Restrict)
+  company    Company?   @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  activities Activity[]
+  sourceDeal Deal?
+  rawMarketLeads RawMarketLead[]
+
+  @@index([productId])
+  @@index([companyId])
+  @@index([leadType])
+  @@index([status])
+  @@index([priority])
+  @@index([originCountry])
+  @@index([destinationCountry])
+  @@index([createdAt])
+  @@index([publishedAt])
+}
+
+model Deal {
+  id                 String    @id @default(cuid())
+  productId          String
+  sourceLeadId       String?   @unique
+  sellerCompanyId    String?
+  buyerCompanyId     String?
+  volume             Decimal?  @db.Decimal(18, 4)
+  unit               String?
+  price              Decimal?  @db.Decimal(18, 4)
+  currency           String?
+  incoterms          String?
+  originCountry      String?
+  destinationCountry String?
+  stage              DealStage @default(DRAFT)
+  notes              String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  product       Product    @relation(fields: [productId], references: [id], onDelete: Restrict)
+  sourceLead    Lead?      @relation(fields: [sourceLeadId], references: [id], onDelete: SetNull)
+  sellerCompany Company?   @relation("SellerCompany", fields: [sellerCompanyId], references: [id], onDelete: SetNull)
+  buyerCompany  Company?   @relation("BuyerCompany", fields: [buyerCompanyId], references: [id], onDelete: SetNull)
+  activities    Activity[]
+
+  @@index([productId])
+  @@index([stage])
+  @@index([sellerCompanyId])
+  @@index([buyerCompanyId])
+  @@index([originCountry])
+  @@index([destinationCountry])
+  @@index([createdAt])
+}
+
+model Activity {
+  id             String       @id @default(cuid())
+  companyId      String?
+  contactId      String?
+  leadId         String?
+  dealId         String?
+  type           ActivityType
+  note           String
+  nextActionDate DateTime?
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  company Company? @relation(fields: [companyId], references: [id], onDelete: SetNull)
+  contact Contact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
+  lead    Lead?    @relation(fields: [leadId], references: [id], onDelete: SetNull)
+  deal    Deal?    @relation(fields: [dealId], references: [id], onDelete: SetNull)
+
+  @@index([companyId])
+  @@index([contactId])
+  @@index([leadId])
+  @@index([dealId])
+  @@index([type])
+  @@index([nextActionDate])
+  @@index([createdAt])
+}
+
+model SearchJob {
+  id                 String          @id @default(cuid())
+  query              String
+  country            String?
+  intent             String?
+  customSources      String[]        @default([])
+  parsedQuery        Json?
+  recommendedSources Json?
+  selectedSources    String[]        @default([])
+  maxSources         Int             @default(5)
+  maxResultsPerSource Int            @default(12)
+  status             SearchJobStatus @default(PENDING)
+  startedAt          DateTime?
+  completedAt        DateTime?
+  failedAt           DateTime?
+  errorMessage       String?
+  totalSources       Int             @default(0)
+  processedSources   Int             @default(0)
+  totalResults       Int             @default(0)
+  importedLeads      Int             @default(0)
+  savedRawLeads      Int             @default(0)
+  lowConfidenceDropped Int           @default(0)
+  warnings           String[]        @default([])
+  savedSearchId      String?
+  createdAt          DateTime        @default(now())
+  updatedAt          DateTime        @updatedAt
+
+  sourceRuns         SearchJobSourceRun[]
+  rawLeads           RawMarketLead[]
+  savedSearch        SavedSearch?    @relation(fields: [savedSearchId], references: [id], onDelete: SetNull)
+
+  @@index([status])
+  @@index([createdAt])
+  @@index([savedSearchId])
+}
+
+model SearchJobSourceRun {
+  id               String          @id @default(cuid())
+  jobId            String
+  sourceId         String
+  sourceName       String
+  executionMode    String
+  status           SourceRunStatus @default(PENDING)
+  startedAt        DateTime?
+  completedAt      DateTime?
+  responseStatus   Int?
+  parseStatus      String?
+  extractedResults Int             @default(0)
+  importedLeads    Int             @default(0)
+  savedRawLeads    Int             @default(0)
+  blocked          Boolean         @default(false)
+  warnings         String[]        @default([])
+  diagnostics      Json?
+  resultsJson      Json?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+
+  job              SearchJob       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  rawLeads         RawMarketLead[]
+
+  @@unique([jobId, sourceId])
+  @@index([jobId])
+  @@index([sourceId])
+  @@index([status])
+}
+
+model RawMarketLead {
+  id               String              @id @default(cuid())
+  sourceName       String
+  sourceUrl        String
+  sourceUrlHash    String              @unique
+  searchJobId      String?
+  sourceRunId      String?
+  normalized       Json
+  aiClassification String?
+  aiSummary        String?
+  relevanceScore   Float?
+  confidenceScore  Float?
+  status           RawMarketLeadStatus @default(PENDING_REVIEW)
+  leadId           String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  searchJob        SearchJob?          @relation(fields: [searchJobId], references: [id], onDelete: SetNull)
+  sourceRun        SearchJobSourceRun? @relation(fields: [sourceRunId], references: [id], onDelete: SetNull)
+  lead             Lead?               @relation(fields: [leadId], references: [id], onDelete: SetNull)
+
+  @@index([sourceName])
+  @@index([status])
+  @@index([searchJobId])
+  @@index([sourceRunId])
+  @@index([createdAt])
+}
+
+model SavedSearch {
+  id              String      @id @default(cuid())
+  name            String
+  keyword         String
+  country         String?
+  intent          String?
+  customSources   String[]    @default([])
+  frequencyHours  Int
+  isActive        Boolean     @default(true)
+  lastRunAt       DateTime?
+  nextRunAt       DateTime?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  jobs            SearchJob[]
+
+  @@index([isActive, nextRunAt])
+  @@index([createdAt])
+}
+
+model SourcePerformance {
+  id               String   @id @default(cuid())
+  sourceId         String
+  intent           String
+  totalRuns        Int      @default(0)
+  successCount     Int      @default(0)
+  blockedCount     Int      @default(0)
+  totalExtracted   Int      @default(0)
+  totalRelevance   Float    @default(0)
+  averageExtracted Float    @default(0)
+  averageRelevance Float    @default(0)
+  lastSuccessAt    DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([sourceId, intent])
+  @@index([sourceId])
+  @@index([intent])
+}

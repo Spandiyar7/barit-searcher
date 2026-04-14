@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  @apply bg-background text-foreground antialiased;
+}
+
+* {
+  @apply border-border;
+}
+
+.crm-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: #c7d2e1 #f1f5f9;
+}
+
+.crm-scrollbar::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.crm-scrollbar::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+.crm-scrollbar::-webkit-scrollbar-thumb {
+  background: #c7d2e1;
+  border-radius: 999px;
+}
+
+.dashboard-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+}

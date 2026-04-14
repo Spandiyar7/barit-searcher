@@ -1,0 +1,482 @@
+"use client";
+
+import Link from "next/link";
+import { useEffect, useMemo, useState } from "react";
+import { ExternalLink } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardTitle } from "@/components/ui/card";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Input } from "@/components/ui/input";
+import { Select } from "@/components/ui/select";
+import { getTranslator } from "@/lib/i18n/dictionaries";
+import type { Locale } from "@/lib/i18n/config";
+
+type LeadDiscoveryRole = "buyer" | "supplier" | "importer" | "exporter" | "manufacturer" | "trader";
+type WhyMatchedCode =
+  | "roleMatch"
+  | "countryMatch"
+  | "productMatch"
+  | "enrichment"
+  | "sourceQuality"
+  | "confidence"
+  | "repeatedSignals"
+  | "multiSource";
+
+type LeadDiscoveryItem = {
+  id: string;
+  leadId: string | null;
+  dealId: string | null;
+  company: string;
+  country: string | null;
+  role: LeadDiscoveryRole;
+  product: string | null;
+  confidenceScore: number;
+  rankingScore: number;
+  sourceName: string;
+  sourceUrl: string;
+  contactName: string | null;
+  contactEmail: string | null;
+  contactPhone: string | null;
+  aiExplanation: string;
+  nextAction: string;
+  whyMatched: WhyMatchedCode[];
+  status: string;
+  createdAt: string;
+  rawResult: Record<string, unknown>;
+};
+
+type LeadDiscoverySnapshot = {
+  job: {
+    id: string;
+    status: string;
+    query: string;
+    createdAt: string;
+    parsedIntent: string;
+    targetCountry: string | null;
+  };
+  totals: {
+    readyLeads: number;
+    hiddenReview: number;
+    lowConfidence: number;
+    imported: number;
+    duplicates: number;
+  };
+  leads: LeadDiscoveryItem[];
+};
+
+type ApiPayload<T> = { data?: T; error?: string };
+
+const roleVariant = (role: LeadDiscoveryRole) => {
+  if (role === "buyer" || role === "importer") return "info" as const;
+  if (role === "supplier" || role === "manufacturer" || role === "exporter") return "success" as const;
+  return "default" as const;
+};
+
+const confidenceVariant = (score: number) => {
+  if (score >= 80) return "success" as const;
+  if (score >= 65) return "warning" as const;
+  return "default" as const;
+};
+
+export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
+  const t = getTranslator(locale);
+
+  const [query, setQuery] = useState("");
+  const [country, setCountry] = useState("");
+  const [intent, setIntent] = useState("");
+
+  const [jobId, setJobId] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [polling, setPolling] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [snapshot, setSnapshot] = useState<LeadDiscoverySnapshot | null>(null);
+
+  const [roleFilter, setRoleFilter] = useState("");
+  const [countryFilter, setCountryFilter] = useState("");
+  const [sourceFilter, setSourceFilter] = useState("");
+  const [productFilter, setProductFilter] = useState("");
+  const [confidenceFilter, setConfidenceFilter] = useState("65");
+
+  const [actionState, setActionState] = useState<Record<string, string>>({});
+  const [outreachByLeadId, setOutreachByLeadId] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    if (!jobId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const poll = async () => {
+      try {
+        setPolling(true);
+        const response = await fetch(`/api/lead-discovery/jobs/${jobId}`);
+        const json = (await response.json().catch(() => ({}))) as ApiPayload<LeadDiscoverySnapshot>;
+
+        if (!response.ok || !json.data) {
+          throw new Error(json.error || t("leadDiscovery.loadError"));
+        }
+
+        if (cancelled) return;
+        setSnapshot(json.data);
+        setError(null);
+
+        if (json.data.job.status === "PENDING" || json.data.job.status === "RUNNING") {
+          timer = setTimeout(() => void poll(), 2500);
+        }
+      } catch (err) {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : t("leadDiscovery.loadError"));
+        timer = setTimeout(() => void poll(), 4000);
+      } finally {
+        if (!cancelled) setPolling(false);
+      }
+    };
+
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [jobId, t]);
+
+  const runDiscovery = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!query.trim()) {
+      setError(t("leadDiscovery.queryRequired"));
+      return;
+    }
+
+    try {
+      setLoading(true);
+      setError(null);
+      const response = await fetch("/api/lead-discovery/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          q: query.trim(),
+          country: country.trim(),
+          intent: intent || undefined,
+          customSources: ""
+        })
+      });
+      const json = (await response.json().catch(() => ({}))) as ApiPayload<{ job_id: string }>;
+      if (!response.ok || !json.data?.job_id) throw new Error(json.error || t("leadDiscovery.createError"));
+      setSnapshot(null);
+      setJobId(json.data.job_id);
+      setActionState({});
+      setOutreachByLeadId({});
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("leadDiscovery.createError"));
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const filteredLeads = useMemo(() => {
+    if (!snapshot?.leads) return [];
+    const minConfidence = Number(confidenceFilter || "0");
+    return snapshot.leads.filter((lead) => {
+      if (roleFilter && lead.role !== roleFilter) return false;
+      if (countryFilter && !(lead.country || "").toLowerCase().includes(countryFilter.toLowerCase())) return false;
+      if (sourceFilter && lead.sourceName !== sourceFilter) return false;
+      if (productFilter && !(lead.product || "").toLowerCase().includes(productFilter.toLowerCase())) return false;
+      if (Number.isFinite(minConfidence) && lead.confidenceScore < minConfidence) return false;
+      return true;
+    });
+  }, [snapshot, roleFilter, countryFilter, sourceFilter, productFilter, confidenceFilter]);
+
+  const sourceOptions = useMemo(() => {
+    if (!snapshot) return [];
+    return Array.from(new Set(snapshot.leads.map((item) => item.sourceName))).sort((a, b) => a.localeCompare(b));
+  }, [snapshot]);
+
+  const postJson = async (url: string, payload: Record<string, unknown>) => {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const json = (await response.json().catch(() => ({}))) as ApiPayload<Record<string, unknown>>;
+    if (!response.ok) throw new Error(json.error || t("leadDiscovery.actionFailed"));
+    return json.data || {};
+  };
+
+  const onAssignManager = async (lead: LeadDiscoveryItem) => {
+    if (!lead.leadId) return;
+    const manager = window.prompt(t("leadDiscovery.managerPrompt"));
+    if (!manager || manager.trim().length < 2) return;
+    try {
+      await postJson("/api/lead-discovery/actions/assign", { leadId: lead.leadId, manager: manager.trim() });
+      setActionState((prev) => ({ ...prev, [lead.id]: t("leadDiscovery.assigned") }));
+    } catch (err) {
+      setActionState((prev) => ({ ...prev, [lead.id]: err instanceof Error ? err.message : t("leadDiscovery.actionFailed") }));
+    }
+  };
+
+  const onMarkContacted = async (lead: LeadDiscoveryItem) => {
+    if (!lead.leadId) return;
+    try {
+      await postJson("/api/lead-discovery/actions/contacted", { leadId: lead.leadId });
+      setActionState((prev) => ({ ...prev, [lead.id]: t("leadDiscovery.contacted") }));
+      setSnapshot((prev) =>
+        prev
+          ? {
+              ...prev,
+              leads: prev.leads.map((item) => (item.id === lead.id ? { ...item, status: "CONTACTED" } : item))
+            }
+          : prev
+      );
+    } catch (err) {
+      setActionState((prev) => ({ ...prev, [lead.id]: err instanceof Error ? err.message : t("leadDiscovery.actionFailed") }));
+    }
+  };
+
+  const onGenerateOutreach = async (lead: LeadDiscoveryItem) => {
+    if (!lead.leadId) return;
+    try {
+      const data = await postJson("/api/lead-discovery/actions/outreach", { leadId: lead.leadId });
+      const message = typeof data.message === "string" ? data.message : t("leadDiscovery.noOutreach");
+      setOutreachByLeadId((prev) => ({ ...prev, [lead.id]: message }));
+    } catch (err) {
+      setActionState((prev) => ({ ...prev, [lead.id]: err instanceof Error ? err.message : t("leadDiscovery.actionFailed") }));
+    }
+  };
+
+  const onConvertToDeal = async (lead: LeadDiscoveryItem) => {
+    if (!lead.leadId) return;
+    try {
+      const response = await fetch(`/api/leads/${lead.leadId}/convert`, { method: "POST" });
+      const json = (await response.json().catch(() => ({}))) as ApiPayload<{ id: string }>;
+      if (!response.ok || !json.data?.id) throw new Error(json.error || t("leadDiscovery.actionFailed"));
+      const dealId = json.data.id;
+      setActionState((prev) => ({ ...prev, [lead.id]: `${t("leadDiscovery.dealCreated")} #${dealId}` }));
+      setSnapshot((prev) =>
+        prev
+          ? {
+              ...prev,
+              leads: prev.leads.map((item) => (item.id === lead.id ? { ...item, dealId } : item))
+            }
+          : prev
+      );
+    } catch (err) {
+      setActionState((prev) => ({ ...prev, [lead.id]: err instanceof Error ? err.message : t("leadDiscovery.actionFailed") }));
+    }
+  };
+
+  const onSaveLead = async (lead: LeadDiscoveryItem) => {
+    if (lead.leadId) return;
+    try {
+      const response = await fetch("/api/market-intelligence/import", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          result: lead.rawResult,
+          save_company: true,
+          with_ai: false
+        })
+      });
+      const json = (await response.json().catch(() => ({}))) as ApiPayload<{ leadId?: string; status?: string }>;
+      if (!response.ok || !json.data?.leadId) throw new Error(json.error || t("leadDiscovery.actionFailed"));
+      const savedLeadId = json.data.leadId;
+      setActionState((prev) => ({ ...prev, [lead.id]: t("leadDiscovery.saved") }));
+      setSnapshot((prev) =>
+        prev
+          ? {
+              ...prev,
+              leads: prev.leads.map((item) => (item.id === lead.id ? { ...item, leadId: savedLeadId || null } : item))
+            }
+          : prev
+      );
+    } catch (err) {
+      setActionState((prev) => ({ ...prev, [lead.id]: err instanceof Error ? err.message : t("leadDiscovery.actionFailed") }));
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      <Card>
+        <form className="grid gap-3 md:grid-cols-4" onSubmit={runDiscovery}>
+          <Input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t("leadDiscovery.queryPlaceholder")}
+            className="md:col-span-2"
+          />
+          <Input value={country} onChange={(event) => setCountry(event.target.value)} placeholder={t("leadDiscovery.country")} />
+          <Select value={intent} onChange={(event) => setIntent(event.target.value)}>
+            <option value="">{t("leadDiscovery.allIntents")}</option>
+            <option value="buyers">{t("leadDiscovery.roleBuyer")}</option>
+            <option value="suppliers">{t("leadDiscovery.roleSupplier")}</option>
+            <option value="manufacturers">{t("leadDiscovery.roleManufacturer")}</option>
+            <option value="importers">{t("leadDiscovery.roleImporter")}</option>
+            <option value="exporters">{t("leadDiscovery.roleExporter")}</option>
+            <option value="rfq">RFQ</option>
+          </Select>
+          <Button type="submit" disabled={loading} className="md:col-span-4">
+            {loading ? t("leadDiscovery.running") : t("leadDiscovery.runDiscovery")}
+          </Button>
+        </form>
+        <p className="mt-3 text-xs text-slate-500">{t("leadDiscovery.examples")}</p>
+      </Card>
+
+      {error ? <p className="text-sm text-rose-600">{error}</p> : null}
+
+      {snapshot ? (
+        <div className="grid gap-4 md:grid-cols-4">
+          <Card>
+            <CardTitle>{t("leadDiscovery.readyLeads")}</CardTitle>
+            <p className="mt-3 text-2xl font-bold">{snapshot.totals.readyLeads}</p>
+          </Card>
+          <Card>
+            <CardTitle>{t("leadDiscovery.hiddenReview")}</CardTitle>
+            <p className="mt-3 text-2xl font-bold">{snapshot.totals.hiddenReview}</p>
+          </Card>
+          <Card>
+            <CardTitle>{t("leadDiscovery.lowConfidence")}</CardTitle>
+            <p className="mt-3 text-2xl font-bold">{snapshot.totals.lowConfidence}</p>
+          </Card>
+          <Card>
+            <CardTitle>{t("leadDiscovery.status")}</CardTitle>
+            <p className="mt-3 text-sm font-semibold">{snapshot.job.status}</p>
+            <p className="text-xs text-slate-500">{polling ? t("leadDiscovery.updating") : t("leadDiscovery.stable")}</p>
+          </Card>
+        </div>
+      ) : null}
+
+      {snapshot ? (
+        <Card>
+          <div className="grid gap-3 md:grid-cols-5">
+            <Select value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)}>
+              <option value="">{t("leadDiscovery.allRoles")}</option>
+              <option value="buyer">{t("leadDiscovery.roleBuyer")}</option>
+              <option value="supplier">{t("leadDiscovery.roleSupplier")}</option>
+              <option value="manufacturer">{t("leadDiscovery.roleManufacturer")}</option>
+              <option value="importer">{t("leadDiscovery.roleImporter")}</option>
+              <option value="exporter">{t("leadDiscovery.roleExporter")}</option>
+              <option value="trader">{t("leadDiscovery.roleTrader")}</option>
+            </Select>
+            <Input value={countryFilter} onChange={(event) => setCountryFilter(event.target.value)} placeholder={t("leadDiscovery.country")} />
+            <Select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value)}>
+              <option value="">{t("leadDiscovery.allSources")}</option>
+              {sourceOptions.map((source) => (
+                <option value={source} key={source}>
+                  {source}
+                </option>
+              ))}
+            </Select>
+            <Input value={productFilter} onChange={(event) => setProductFilter(event.target.value)} placeholder={t("leadDiscovery.product")} />
+            <Input
+              value={confidenceFilter}
+              onChange={(event) => setConfidenceFilter(event.target.value)}
+              type="number"
+              min="0"
+              max="100"
+              step="1"
+              placeholder={t("leadDiscovery.minConfidence")}
+            />
+          </div>
+        </Card>
+      ) : null}
+
+      {!snapshot ? (
+        <EmptyState title={t("leadDiscovery.emptyTitle")} description={t("leadDiscovery.emptyDescription")} />
+      ) : filteredLeads.length === 0 ? (
+        <EmptyState title={t("leadDiscovery.noMatches")} description={t("leadDiscovery.noMatchesDescription")} />
+      ) : (
+        <div className="space-y-4">
+          {filteredLeads.map((lead) => (
+            <Card key={lead.id} className="space-y-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h3 className="text-base font-semibold text-slate-900">{lead.company}</h3>
+                    <Badge variant={roleVariant(lead.role)}>{t(`leadDiscovery.role.${lead.role}`)}</Badge>
+                    <Badge variant={confidenceVariant(lead.confidenceScore)}>
+                      {t("leadDiscovery.confidence")} {lead.confidenceScore.toFixed(0)}%
+                    </Badge>
+                    <Badge variant="info">
+                      {t("leadDiscovery.rank")} {lead.rankingScore.toFixed(0)}
+                    </Badge>
+                  </div>
+                  <p className="text-sm text-slate-600">
+                    {lead.product || "-"} • {lead.country || "-"} • {lead.sourceName}
+                  </p>
+                  <p className="text-sm text-slate-700">{lead.aiExplanation}</p>
+                </div>
+                <Link
+                  href={lead.sourceUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-sm text-primary hover:underline"
+                >
+                  <ExternalLink size={14} />
+                  {t("leadDiscovery.openSource")}
+                </Link>
+              </div>
+
+              <div className="grid gap-3 md:grid-cols-3">
+                <p className="text-sm text-slate-600">
+                  <span className="font-semibold text-slate-800">{t("leadDiscovery.contact")}:</span>{" "}
+                  {lead.contactName || "-"}
+                </p>
+                <p className="text-sm text-slate-600">
+                  <span className="font-semibold text-slate-800">Email:</span> {lead.contactEmail || "-"}
+                </p>
+                <p className="text-sm text-slate-600">
+                  <span className="font-semibold text-slate-800">Phone:</span> {lead.contactPhone || "-"}
+                </p>
+              </div>
+
+              <p className="text-sm text-slate-600">
+                <span className="font-semibold text-slate-800">{t("leadDiscovery.nextAction")}:</span> {lead.nextAction}
+              </p>
+
+              <div className="flex flex-wrap items-center gap-2">
+                {lead.whyMatched.map((reason) => (
+                  <Badge key={`${lead.id}-${reason}`} variant="default">
+                    {t(`leadDiscovery.why.${reason}`)}
+                  </Badge>
+                ))}
+              </div>
+
+              <div className="flex flex-wrap gap-2">
+                {lead.leadId ? (
+                  <Link href={`/leads/${lead.leadId}`}>
+                    <Button variant="secondary">{t("leadDiscovery.saved")}</Button>
+                  </Link>
+                ) : (
+                  <Button variant="secondary" onClick={() => void onSaveLead(lead)}>
+                    {t("leadDiscovery.saveToCrm")}
+                  </Button>
+                )}
+                <Button variant="ghost" onClick={() => void onAssignManager(lead)} disabled={!lead.leadId}>
+                  {t("leadDiscovery.assignManager")}
+                </Button>
+                <Button variant="ghost" onClick={() => void onGenerateOutreach(lead)} disabled={!lead.leadId}>
+                  {t("leadDiscovery.generateOutreach")}
+                </Button>
+                <Button variant="ghost" onClick={() => void onMarkContacted(lead)} disabled={!lead.leadId}>
+                  {t("leadDiscovery.markContacted")}
+                </Button>
+                <Button variant="primary" onClick={() => void onConvertToDeal(lead)} disabled={!lead.leadId}>
+                  {t("leadDiscovery.convertToDeal")}
+                </Button>
+              </div>
+
+              {actionState[lead.id] ? <p className="text-xs text-slate-500">{actionState[lead.id]}</p> : null}
+
+              {outreachByLeadId[lead.id] ? (
+                <div className="rounded-lg border border-border bg-slate-50 p-3">
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    {t("leadDiscovery.outreachDraft")}
+                  </p>
+                  <pre className="whitespace-pre-wrap text-xs text-slate-700">{outreachByLeadId[lead.id]}</pre>
+                </div>
+              ) : null}
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
