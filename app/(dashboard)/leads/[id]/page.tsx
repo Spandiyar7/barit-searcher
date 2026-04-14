@@ -6,6 +6,7 @@ import { Card, CardTitle } from "@/components/ui/card";
 import { LeadPriorityBadge, LeadStatusBadge, LeadTypeBadge } from "@/components/ui/entity-badges";
 import { DeleteButton } from "@/components/ui/delete-button";
 import { ConvertToDealButton } from "@/components/leads/convert-to-deal-button";
+import { FindContactButton } from "@/components/leads/find-contact-button";
 import { LeadNextActions } from "@/components/leads/lead-next-actions";
 import { ActivityTimeline } from "@/components/activities/activity-timeline";
 import { ActivityForm } from "@/components/activities/activity-form";
@@ -143,6 +144,13 @@ export default async function LeadDetailPage({ params }: { params: { id: string 
               Edit
             </Link>
             <ConvertToDealButton leadId={lead.id} />
+            <FindContactButton
+              leadId={lead.id}
+              idleLabel={t("leads.findContact")}
+              loadingLabel={t("leads.findingContact")}
+              successLabel={t("leads.findContactDone")}
+              errorLabel={t("leads.findContactError")}
+            />
             {lead.sourceDeal ? (
               <Link href={`/deals/${lead.sourceDeal.id}`} className="rounded-lg border border-border px-4 py-2 text-sm font-semibold">
                 Open Deal

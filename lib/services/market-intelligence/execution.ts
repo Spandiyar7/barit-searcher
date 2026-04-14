@@ -4,7 +4,9 @@ import { runAutomatedSourceIndexFallback } from "./index-fallback";
 import type {
   ParsedQuery,
   SourceDiagnostic,
+  SourceDiagnosticCode,
   SourceEngineResult,
+  SourceExecutionTrace,
   SourceExecutionMode,
   SourceId,
   SourceRecommendation,
@@ -120,21 +122,57 @@ const withExecutionTimeout = async (
     })
   ]);
 
+const inferFallbackBlocked = (result: SourceEngineResult | null) => {
+  if (!result) return false;
+  if (result.blocked || result.response_status === 403) return true;
+  return result.warnings.some((warning) => /\b(403|blocked|challenge|captcha|anti-bot)\b/i.test(warning));
+};
+
+const inferDiagnosticCode = (trace: SourceExecutionTrace, result: SourceEngineResult): SourceDiagnosticCode => {
+  if (trace.no_adapter) return "no_adapter";
+  if (trace.fallback_attempted && (trace.fallback_blocked || result.status === "blocked")) return "fallback_blocked";
+  if (trace.native_attempted && !trace.native_success) return "source_native_failure";
+  if (result.extracted_results === 0) return "empty_results";
+  return "ok";
+};
+
+const inferAcquisitionPath = (trace: SourceExecutionTrace): SourceDiagnostic["acquisition_path"] => {
+  if (trace.native_attempted && trace.fallback_attempted) return "native_plus_fallback";
+  if (!trace.native_attempted && trace.fallback_attempted) return "fallback_only";
+  if (trace.native_attempted) return "native";
+  return "none";
+};
+
 export const executeSourceWithFallback = async (
   sourceId: SourceId,
   parsedQuery: ParsedQuery,
   maxResults: number
-): Promise<{ result: SourceEngineResult; attempted_modes: SourceExecutionMode[] }> => {
+): Promise<{ result: SourceEngineResult; attempted_modes: SourceExecutionMode[]; trace: SourceExecutionTrace }> => {
   const source = SOURCE_BY_ID.get(sourceId);
 
   if (!source) {
+    const trace: SourceExecutionTrace = {
+      source_id: sourceId,
+      no_adapter: true,
+      native_attempted: false,
+      native_success: false,
+      fallback_attempted: false,
+      fallback_success: false,
+      fallback_blocked: false,
+      fallback_error: false,
+      empty_results: true
+    };
     return {
       result: manualModeResult(sourceId, sourceId, `Unknown source: ${sourceId}`),
-      attempted_modes: ["manual"]
+      attempted_modes: ["manual"],
+      trace
     };
   }
 
-  const runAutomatedFallback = async (message: string) => {
+  const runAutomatedFallback = async (
+    message: string,
+    options: { noAdapter: boolean; fallbackAttemptedFrom: SourceExecutionMode[] }
+  ) => {
     const fallbackRun = await runAutomatedSourceIndexFallback({
       sourceId,
       sourceName: source.name,
@@ -144,26 +182,61 @@ export const executeSourceWithFallback = async (
 
     if (fallbackRun) {
       fallbackRun.warnings = [message, ...fallbackRun.warnings];
+      const fallbackBlocked = inferFallbackBlocked(fallbackRun);
+      const fallbackSuccess = fallbackRun.results.length > 0;
+      const trace: SourceExecutionTrace = {
+        source_id: sourceId,
+        no_adapter: options.noAdapter,
+        native_attempted: false,
+        native_success: false,
+        fallback_attempted: true,
+        fallback_success: fallbackSuccess,
+        fallback_blocked: fallbackBlocked,
+        fallback_error: !fallbackSuccess && !fallbackBlocked,
+        empty_results: fallbackRun.results.length === 0
+      };
+
       return {
         result: fallbackRun,
-        attempted_modes: ["manual", "fetch"] as SourceExecutionMode[]
+        attempted_modes: options.fallbackAttemptedFrom,
+        trace
       };
     }
 
+    const trace: SourceExecutionTrace = {
+      source_id: sourceId,
+      no_adapter: options.noAdapter,
+      native_attempted: false,
+      native_success: false,
+      fallback_attempted: false,
+      fallback_success: false,
+      fallback_blocked: false,
+      fallback_error: true,
+      empty_results: true
+    };
+
     return {
       result: manualModeResult(sourceId, source.name, message),
-      attempted_modes: ["manual"] as SourceExecutionMode[]
+      attempted_modes: ["manual"] as SourceExecutionMode[],
+      trace
     };
   };
 
   if (source.executionMode === "manual") {
-    return runAutomatedFallback(`${source.name}: manual execution mode configured; automated index fallback attempted.`);
+    return runAutomatedFallback(`${source.name}: manual execution mode configured; automated index fallback attempted.`, {
+      noAdapter: false,
+      fallbackAttemptedFrom: ["manual", "fetch"]
+    });
   }
 
   const engine = MARKET_SOURCE_ENGINES[sourceId];
   if (!engine) {
     return runAutomatedFallback(
-      `${source.name}: no native engine implemented; automated index fallback attempted.`
+      `${source.name}: no native engine implemented; automated index fallback attempted.`,
+      {
+        noAdapter: true,
+        fallbackAttemptedFrom: ["manual", "fetch"]
+      }
     );
   }
 
@@ -186,6 +259,10 @@ export const executeSourceWithFallback = async (
   );
 
   runs.push(primary);
+  let fallbackAttempted = false;
+  let fallbackSuccess = false;
+  let fallbackBlocked = false;
+  let fallbackError = false;
 
   const shouldFallbackToBrowser =
     primaryMode === "fetch" &&
@@ -219,6 +296,7 @@ export const executeSourceWithFallback = async (
       mergedAfterPrimary.status === "error");
 
   if (shouldUseAutomatedIndexFallback) {
+    fallbackAttempted = true;
     const fallbackRun = await runAutomatedSourceIndexFallback({
       sourceId,
       sourceName: source.name,
@@ -232,27 +310,60 @@ export const executeSourceWithFallback = async (
         ...fallbackRun.warnings
       ];
       runs.push(fallbackRun);
+      fallbackBlocked = inferFallbackBlocked(fallbackRun);
+      fallbackSuccess = fallbackRun.results.length > 0;
+      fallbackError = !fallbackSuccess && !fallbackBlocked;
+    } else {
+      fallbackError = true;
     }
   }
 
+  const merged = mergeSourceEngineRuns(runs);
+  const nativeSuccess = primary.results.length > 0 || merged.results.length > 0;
+  const trace: SourceExecutionTrace = {
+    source_id: sourceId,
+    no_adapter: false,
+    native_attempted: true,
+    native_success: nativeSuccess,
+    fallback_attempted: fallbackAttempted,
+    fallback_success: fallbackSuccess,
+    fallback_blocked: fallbackBlocked,
+    fallback_error: fallbackError,
+    empty_results: merged.results.length === 0
+  };
+
   return {
-    result: mergeSourceEngineRuns(runs),
-    attempted_modes: attemptedModes
+    result: merged,
+    attempted_modes: attemptedModes,
+    trace
   };
 };
 
 export const buildSourceDiagnostics = (
-  executionResults: Array<{ result: SourceEngineResult; attempted_modes: SourceExecutionMode[] }>,
+  executionResults: Array<{ result: SourceEngineResult; attempted_modes: SourceExecutionMode[]; trace?: SourceExecutionTrace }>,
   recommendations: SourceRecommendation[] = []
 ): SourceDiagnostic[] =>
-  executionResults.map(({ result, attempted_modes }) => {
+  executionResults.map(({ result, attempted_modes, trace }) => {
     const source = SOURCE_BY_ID.get(result.sourceId);
     const recommendation = recommendations.find((item) => item.source_id === result.sourceId);
+    const fallbackTrace: SourceExecutionTrace = trace || {
+      source_id: result.sourceId,
+      no_adapter: false,
+      native_attempted: true,
+      native_success: result.extracted_results > 0,
+      fallback_attempted: false,
+      fallback_success: false,
+      fallback_blocked: false,
+      fallback_error: false,
+      empty_results: result.extracted_results === 0
+    };
 
     return {
       source_id: result.sourceId,
       source_name: result.sourceName,
       priority_tier: source?.priorityTier,
+      diagnostic_code: inferDiagnosticCode(fallbackTrace, result),
+      acquisition_path: inferAcquisitionPath(fallbackTrace),
       status: result.status,
       execution_mode: result.execution_mode,
       attempted_modes,

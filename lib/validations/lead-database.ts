@@ -9,10 +9,19 @@ export const leadDatabaseListQuerySchema = z.object({
   role: z
     .enum(["buyer", "supplier", "importer", "exporter", "manufacturer", "trader"])
     .optional(),
+  tier: z.enum(["ready", "actionable", "signal"]).optional(),
   country: z.string().trim().max(80).optional().default(""),
   source: z.string().trim().max(120).optional().default(""),
   confidence: z.coerce.number().min(0).max(100).optional(),
   has_contact: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((value) => (value === undefined ? undefined : value === "true")),
+  has_email: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((value) => (value === undefined ? undefined : value === "true")),
+  has_phone: z
     .enum(["true", "false"])
     .optional()
     .transform((value) => (value === undefined ? undefined : value === "true")),

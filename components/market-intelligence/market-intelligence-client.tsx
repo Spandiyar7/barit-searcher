@@ -55,6 +55,52 @@ const persistenceClass = (status: JobResultItem["persistence_status"]) => {
   return "bg-blue-100 text-blue-700";
 };
 
+const localizeSourceReason = (reason: string, t: (key: string, fallback?: string) => string) => {
+  if (!reason) return "-";
+
+  const phraseMap: Array<{ pattern: RegExp; key: string }> = [
+    { pattern: /Tier 1 priority/gi, key: "marketIntelligence.reason.tier1Priority" },
+    { pattern: /Tier 2 signal support/gi, key: "marketIntelligence.reason.tier2Signal" },
+    { pattern: /Tier 3 fallback/gi, key: "marketIntelligence.reason.tier3Fallback" },
+    { pattern: /Default weight/gi, key: "marketIntelligence.reason.defaultWeight" },
+    { pattern: /Reliability/gi, key: "marketIntelligence.reason.reliability" },
+    { pattern: /Product-category fit/gi, key: "marketIntelligence.reason.categoryFit" },
+    { pattern: /Weak category fit/gi, key: "marketIntelligence.reason.weakCategoryFit" },
+    { pattern: /Query-to-source mapping boost/gi, key: "marketIntelligence.reason.querySourceBoost" },
+    { pattern: /Specialization match/gi, key: "marketIntelligence.reason.specializationMatch" },
+    { pattern: /Intent match/gi, key: "marketIntelligence.reason.intentMatch" },
+    { pattern: /Intent mismatch/gi, key: "marketIntelligence.reason.intentMismatch" },
+    { pattern: /Market-signal source/gi, key: "marketIntelligence.reason.marketSignalSource" },
+    { pattern: /Importer intent boost/gi, key: "marketIntelligence.reason.importerIntentBoost" },
+    { pattern: /Exporter intent analytics boost/gi, key: "marketIntelligence.reason.exporterIntentBoost" },
+    { pattern: /Recurring buyer signal boost/gi, key: "marketIntelligence.reason.recurringSignalBoost" },
+    { pattern: /Engine available/gi, key: "marketIntelligence.reason.engineAvailable" },
+    { pattern: /No native engine/gi, key: "marketIntelligence.reason.noNativeEngine" },
+    { pattern: /Country fit/gi, key: "marketIntelligence.reason.countryFit" },
+    { pattern: /Browser execution/gi, key: "marketIntelligence.reason.browserExecution" },
+    { pattern: /Auto execution/gi, key: "marketIntelligence.reason.autoExecution" },
+    { pattern: /Result-type fit/gi, key: "marketIntelligence.reason.resultTypeFit" },
+    { pattern: /Manual mode penalty/gi, key: "marketIntelligence.reason.manualPenalty" },
+    { pattern: /High anti-bot risk/gi, key: "marketIntelligence.reason.highAntiBotRisk" },
+    { pattern: /Fallback-only for specialized commodity queries/gi, key: "marketIntelligence.reason.fallbackOnlySpecialized" },
+    { pattern: /Specialized Tier 1 match/gi, key: "marketIntelligence.reason.specializedTier1" }
+  ];
+
+  let localized = reason;
+  for (const item of phraseMap) {
+    localized = localized.replace(item.pattern, t(item.key));
+  }
+  return localized;
+};
+
+const diagnosticCodeClass = (code: SourceDiagnostic["diagnostic_code"]) => {
+  if (code === "ok") return "bg-emerald-100 text-emerald-700";
+  if (code === "fallback_blocked") return "bg-rose-100 text-rose-700";
+  if (code === "source_native_failure") return "bg-amber-100 text-amber-700";
+  if (code === "no_adapter") return "bg-slate-200 text-slate-700";
+  return "bg-slate-100 text-slate-600";
+};
+
 export function MarketIntelligenceClient({ locale }: { locale: Locale }) {
   const t = getTranslator(locale);
 
@@ -583,7 +629,7 @@ export function MarketIntelligenceClient({ locale }: { locale: Locale }) {
                       ? source.product_category_fit.join(", ")
                       : "-"}
                   </p>
-                  <p className="mt-1 text-xs text-slate-500">{source.reason}</p>
+                  <p className="mt-1 text-xs text-slate-500">{localizeSourceReason(source.reason, t)}</p>
                   <p className="mt-1 text-[11px] text-slate-500">
                     {t("marketIntelligence.executionMode")}: {source.execution_mode} • {t("marketIntelligence.antiBotRisk")}:{" "}
                     {source.anti_bot_risk}
@@ -603,9 +649,16 @@ export function MarketIntelligenceClient({ locale }: { locale: Locale }) {
               <div key={source.source_id} className="rounded-lg border border-border px-3 py-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <p className="text-sm font-medium text-slate-900">{source.source_name}</p>
-                  <span className={`rounded px-2 py-0.5 text-xs font-semibold ${sourceStatusClass(source.status)}`}>
-                    {source.status}
-                  </span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {source.diagnostic_code ? (
+                      <span className={`rounded px-2 py-0.5 text-xs font-semibold ${diagnosticCodeClass(source.diagnostic_code)}`}>
+                        {t(`marketIntelligence.diagnostic.${source.diagnostic_code}`, source.diagnostic_code)}
+                      </span>
+                    ) : null}
+                    <span className={`rounded px-2 py-0.5 text-xs font-semibold ${sourceStatusClass(source.status)}`}>
+                      {source.status}
+                    </span>
+                  </div>
                 </div>
                 <div className="mt-2 grid gap-2 text-xs text-slate-600 md:grid-cols-3">
                   <p>
@@ -629,12 +682,18 @@ export function MarketIntelligenceClient({ locale }: { locale: Locale }) {
                   <p>
                     {t("marketIntelligence.antiBotRisk")}: {source.anti_bot_risk}
                   </p>
+                  <p>
+                    {t("marketIntelligence.acquisitionPath")}:{" "}
+                    {source.acquisition_path
+                      ? t(`marketIntelligence.acquisition.${source.acquisition_path}`, source.acquisition_path)
+                      : "-"}
+                  </p>
                 </div>
 
                 {source.selection_reason ? (
                   <p className="mt-2 text-xs text-slate-600">
                     <span className="font-medium text-slate-800">{t("marketIntelligence.selectedBecause")}:</span>{" "}
-                    {source.selection_reason}
+                    {localizeSourceReason(source.selection_reason, t)}
                   </p>
                 ) : null}
 

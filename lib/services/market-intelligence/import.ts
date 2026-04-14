@@ -386,6 +386,194 @@ const findOrCreateContact = async (
   return created.id;
 };
 
+const applyEnrichmentToCompany = async (
+  companyId: string,
+  result: NormalizedMarketResult,
+  enrichment: CompanyEnrichment
+) => {
+  const existing = await prisma.company.findUnique({
+    where: { id: companyId },
+    select: {
+      id: true,
+      website: true,
+      description: true,
+      source: true,
+      country: true
+    }
+  });
+
+  if (!existing) return;
+
+  const country = normalizeText(result.country) || normalizeText(enrichment.country) || "";
+  const updateData: {
+    website?: string;
+    description?: string;
+    source?: string;
+    country?: string;
+  } = {};
+
+  if (!existing.website && enrichment.website) updateData.website = enrichment.website;
+  if (!existing.description && enrichment.description) updateData.description = enrichment.description;
+  if (!existing.source) updateData.source = result.source_name;
+  if ((!existing.country || existing.country === "Unknown") && country && country !== "Unknown") {
+    updateData.country = country;
+  }
+
+  if (Object.keys(updateData).length > 0) {
+    await prisma.company.update({
+      where: { id: existing.id },
+      data: updateData
+    });
+  }
+};
+
+const normalizedFromRawPayload = (value: Prisma.JsonValue | null): NormalizedMarketResult | null => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const payload = value as Record<string, unknown>;
+  const sourceUrl = normalizeText(typeof payload.source_url === "string" ? payload.source_url : "");
+  if (!sourceUrl) return null;
+
+  const sourceName = normalizeText(typeof payload.source_name === "string" ? payload.source_name : "");
+  return {
+    id: normalizeText(typeof payload.id === "string" ? payload.id : sourceUrl) || sourceUrl,
+    product: typeof payload.product === "string" ? payload.product : null,
+    company: typeof payload.company === "string" ? payload.company : null,
+    contact_name: typeof payload.contact_name === "string" ? payload.contact_name : null,
+    country: typeof payload.country === "string" ? payload.country : null,
+    quantity: typeof payload.quantity === "string" ? payload.quantity : null,
+    incoterms: typeof payload.incoterms === "string" ? payload.incoterms : null,
+    payment_terms: typeof payload.payment_terms === "string" ? payload.payment_terms : null,
+    description: typeof payload.description === "string" ? payload.description : "",
+    source_name: sourceName || "Unknown Source",
+    source_url: sourceUrl,
+    raw_text: typeof payload.raw_text === "string" ? payload.raw_text : "",
+    result_type: typeof payload.result_type === "string" ? payload.result_type : "market_listing",
+    confidence_score:
+      typeof payload.confidence_score === "number" && Number.isFinite(payload.confidence_score) ? payload.confidence_score : 0.5,
+    shipping_terms: typeof payload.shipping_terms === "string" ? payload.shipping_terms : null,
+    destination: typeof payload.destination === "string" ? payload.destination : null,
+    posted_date: typeof payload.posted_date === "string" ? payload.posted_date : null,
+    source_kind:
+      typeof payload.source_kind === "string" && ["live", "mock", "test", "fallback"].includes(payload.source_kind)
+        ? (payload.source_kind as NormalizedMarketResult["source_kind"])
+        : undefined,
+    import_mode:
+      typeof payload.import_mode === "string" && ["fetch", "browser", "manual", "generated"].includes(payload.import_mode)
+        ? (payload.import_mode as NormalizedMarketResult["import_mode"])
+        : undefined,
+    ai_classification:
+      typeof payload.ai_classification === "string" &&
+      ["buyer", "supplier", "trader", "importer", "exporter"].includes(payload.ai_classification)
+        ? (payload.ai_classification as NormalizedMarketResult["ai_classification"])
+        : undefined,
+    ai_summary: typeof payload.ai_summary === "string" ? payload.ai_summary : null,
+    relevance_score: typeof payload.relevance_score === "number" ? payload.relevance_score : undefined,
+    next_action: typeof payload.next_action === "string" ? payload.next_action : null
+  };
+};
+
+export const enrichLeadContactsById = async (leadId: string) => {
+  const lead = await prisma.lead.findUnique({
+    where: { id: leadId },
+    include: {
+      product: true,
+      company: true,
+      rawMarketLeads: {
+        orderBy: { createdAt: "desc" },
+        take: 1
+      }
+    }
+  });
+
+  if (!lead) throw new Error("Lead not found");
+
+  const rawNormalized = normalizedFromRawPayload((lead.rawMarketLeads[0]?.normalized as Prisma.JsonValue) || null);
+  const result: NormalizedMarketResult =
+    rawNormalized ||
+    withOriginMeta(
+      {
+        id: lead.id,
+        product: lead.product?.name || null,
+        company: lead.company?.name || null,
+        contact_name: null,
+        country: lead.originCountry || lead.destinationCountry || lead.company?.country || null,
+        quantity: lead.volume ? `${lead.volume.toString()}${lead.unit ? ` ${lead.unit}` : ""}` : null,
+        incoterms: lead.incoterms,
+        payment_terms: null,
+        description: lead.title,
+        source_name: lead.sourceName || "Lead Source",
+        source_url: normalizeText(lead.sourceUrl || "") || `https://lead.local/${lead.id}`,
+        raw_text: lead.rawText || lead.title,
+        result_type: lead.leadType === "BUY" ? "buyer_rfq" : lead.leadType === "SELL" ? "supplier_offer" : "market_listing",
+        confidence_score: 0.5,
+        shipping_terms: lead.incoterms,
+        destination: lead.destinationCountry,
+        posted_date: lead.publishedAt?.toISOString() || null
+      },
+      "generated"
+    );
+
+  const enrichment = await enrichCompanyFromMarketResult(result);
+
+  let companyId = lead.companyId || null;
+  if (companyId) {
+    await applyEnrichmentToCompany(companyId, result, enrichment);
+  } else {
+    companyId = await findOrCreateCompany(result, enrichment);
+    if (companyId) {
+      await prisma.lead.update({
+        where: { id: lead.id },
+        data: { companyId }
+      });
+    }
+  }
+
+  const contactId = companyId ? await findOrCreateContact(companyId, result, enrichment) : null;
+
+  const enrichmentLines = [
+    enrichment.website ? `Website: ${enrichment.website}` : "",
+    enrichment.email ? `Email: ${enrichment.email}` : "",
+    enrichment.phone ? `Phone: ${enrichment.phone}` : "",
+    enrichment.telegram ? `Telegram: ${enrichment.telegram}` : "",
+    enrichment.whatsapp ? `WhatsApp: ${enrichment.whatsapp}` : "",
+    enrichment.contactName ? `Contact: ${enrichment.contactName}` : "",
+    enrichment.contactPageUrl ? `Contact Page: ${enrichment.contactPageUrl}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  if (enrichmentLines) {
+    const existingText = lead.rawText || "";
+    const hasAllLines = enrichmentLines
+      .split("\n")
+      .every((line) => line.trim().length === 0 || existingText.includes(line));
+    const nextRawText = `${existingText}\n${enrichmentLines}`.trim();
+    if (!hasAllLines && nextRawText) {
+      await prisma.lead.update({
+        where: { id: lead.id },
+        data: {
+          rawText: truncate(nextRawText, 19000)
+        }
+      });
+    }
+  }
+
+  return {
+    leadId: lead.id,
+    companyId,
+    contactId,
+    enrichment: {
+      website: enrichment.website,
+      email: enrichment.email,
+      phone: enrichment.phone,
+      telegram: enrichment.telegram,
+      whatsapp: enrichment.whatsapp,
+      contactName: enrichment.contactName,
+      contactPageUrl: enrichment.contactPageUrl
+    }
+  };
+};
+
 const safeSourceUrl = (value: string | undefined, rawText: string) => {
   const normalized = normalizeText(value || "");
   if (normalized) {
@@ -532,7 +720,14 @@ export const importMarketIntelligenceLead = async (
       `Result Type: ${input.result.result_type}`,
       input.result.company ? `Company: ${input.result.company}` : "",
       input.result.contact_name ? `Contact: ${input.result.contact_name}` : "",
+      enrichment.contactName ? `Enriched Contact: ${enrichment.contactName}` : "",
       input.result.country ? `Country: ${input.result.country}` : "",
+      enrichment.website ? `Website: ${enrichment.website}` : "",
+      enrichment.email ? `Email: ${enrichment.email}` : "",
+      enrichment.phone ? `Phone: ${enrichment.phone}` : "",
+      enrichment.telegram ? `Telegram: ${enrichment.telegram}` : "",
+      enrichment.whatsapp ? `WhatsApp: ${enrichment.whatsapp}` : "",
+      enrichment.contactPageUrl ? `Contact Page: ${enrichment.contactPageUrl}` : "",
       input.result.quantity ? `Quantity: ${input.result.quantity}` : "",
       input.result.payment_terms ? `Payment Terms: ${input.result.payment_terms}` : "",
       input.result.shipping_terms ? `Shipping Terms: ${input.result.shipping_terms}` : "",

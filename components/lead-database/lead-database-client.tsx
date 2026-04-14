@@ -32,8 +32,11 @@ type LeadDatabaseItem = {
   sourceUrl: string;
   confidenceScore: number;
   rankingScore: number;
+  tier: "ready" | "actionable" | "signal";
   whyMatched: string[];
   hasContact: boolean;
+  hasEmail: boolean;
+  hasPhone: boolean;
   hasVolume: boolean;
   searchJobId: string | null;
   createdAt: string;
@@ -50,6 +53,7 @@ type LeadDatabaseSnapshot = {
   };
   totals: {
     readyLeads: number;
+    actionableLeads: number;
     withContacts: number;
     withVolume: number;
     averageConfidence: number;
@@ -60,6 +64,8 @@ type LeadDatabaseSnapshot = {
 type LeadDatabaseListResponse = {
   totals: {
     total: number;
+    readyLeads: number;
+    actionableLeads: number;
     withContacts: number;
     withVolume: number;
     averageConfidence: number;
@@ -109,11 +115,16 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
 
   const [productFilter, setProductFilter] = useState("");
   const [roleFilter, setRoleFilter] = useState("");
+  const [tierFilter, setTierFilter] = useState("");
   const [countryFilter, setCountryFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
   const [confidenceFilter, setConfidenceFilter] = useState("60");
   const [hasContactFilter, setHasContactFilter] = useState("");
+  const [hasEmailFilter, setHasEmailFilter] = useState("");
+  const [hasPhoneFilter, setHasPhoneFilter] = useState("");
   const [hasVolumeFilter, setHasVolumeFilter] = useState("");
+  const [contactActionState, setContactActionState] = useState<Record<string, string>>({});
+  const [contactLoadingId, setContactLoadingId] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -204,6 +215,29 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
     }
   };
 
+  const findContact = async (leadId: string) => {
+    try {
+      setContactLoadingId(leadId);
+      const response = await fetch(`/api/leads/${leadId}/find-contact`, {
+        method: "POST"
+      });
+      const json = (await response.json().catch(() => ({}))) as ApiPayload<{ leadId: string }>;
+      if (!response.ok) throw new Error(json.error || t("leadDatabase.findContactError"));
+
+      setContactActionState((prev) => ({
+        ...prev,
+        [leadId]: t("leadDatabase.findContactDone")
+      }));
+    } catch (error) {
+      setContactActionState((prev) => ({
+        ...prev,
+        [leadId]: error instanceof Error ? error.message : t("leadDatabase.findContactError")
+      }));
+    } finally {
+      setContactLoadingId(null);
+    }
+  };
+
   const items = useMemo(() => {
     return snapshot?.leads || database?.leads || [];
   }, [snapshot, database]);
@@ -214,16 +248,33 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
     return items.filter((item) => {
       if (productFilter && !(item.product || "").toLowerCase().includes(productFilter.toLowerCase())) return false;
       if (roleFilter && item.role !== roleFilter) return false;
+      if (tierFilter && item.tier !== tierFilter) return false;
       if (countryFilter && !(item.country || "").toLowerCase().includes(countryFilter.toLowerCase())) return false;
       if (sourceFilter && item.sourceName !== sourceFilter) return false;
       if (Number.isFinite(minConfidence) && item.confidenceScore < minConfidence) return false;
       if (hasContactFilter === "yes" && !item.hasContact) return false;
       if (hasContactFilter === "no" && item.hasContact) return false;
+      if (hasEmailFilter === "yes" && !item.hasEmail) return false;
+      if (hasEmailFilter === "no" && item.hasEmail) return false;
+      if (hasPhoneFilter === "yes" && !item.hasPhone) return false;
+      if (hasPhoneFilter === "no" && item.hasPhone) return false;
       if (hasVolumeFilter === "yes" && !item.hasVolume) return false;
       if (hasVolumeFilter === "no" && item.hasVolume) return false;
       return true;
     });
-  }, [items, productFilter, roleFilter, countryFilter, sourceFilter, confidenceFilter, hasContactFilter, hasVolumeFilter]);
+  }, [
+    items,
+    productFilter,
+    roleFilter,
+    tierFilter,
+    countryFilter,
+    sourceFilter,
+    confidenceFilter,
+    hasContactFilter,
+    hasEmailFilter,
+    hasPhoneFilter,
+    hasVolumeFilter
+  ]);
 
   const sourceOptions = useMemo(() => {
     return Array.from(new Set(items.map((item) => item.sourceName))).sort((a, b) => a.localeCompare(b));
@@ -231,13 +282,17 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
 
   const totals = snapshot
     ? {
-        total: snapshot.totals.readyLeads,
+        total: snapshot.totals.readyLeads + snapshot.totals.actionableLeads,
+        readyLeads: snapshot.totals.readyLeads,
+        actionableLeads: snapshot.totals.actionableLeads,
         withContacts: snapshot.totals.withContacts,
         withVolume: snapshot.totals.withVolume,
         averageConfidence: snapshot.totals.averageConfidence
       }
     : {
         total: database?.totals.total || 0,
+        readyLeads: database?.totals.readyLeads || 0,
+        actionableLeads: database?.totals.actionableLeads || 0,
         withContacts: database?.totals.withContacts || 0,
         withVolume: database?.totals.withVolume || 0,
         averageConfidence: database?.totals.averageConfidence || 0
@@ -277,10 +332,14 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
         ) : null}
       </Card>
 
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
         <Card className="space-y-2">
-          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t("leadDatabase.total")}</p>
-          <p className="text-3xl font-bold text-slate-900">{totals.total}</p>
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t("leadDatabase.readyLeads")}</p>
+          <p className="text-3xl font-bold text-slate-900">{totals.readyLeads}</p>
+        </Card>
+        <Card className="space-y-2">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t("leadDatabase.actionableLeads")}</p>
+          <p className="text-3xl font-bold text-slate-900">{totals.actionableLeads}</p>
         </Card>
         <Card className="space-y-2">
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t("leadDatabase.withContacts")}</p>
@@ -294,11 +353,15 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
           <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t("leadDatabase.avgConfidence")}</p>
           <p className="text-3xl font-bold text-slate-900">{totals.averageConfidence.toFixed(2)}%</p>
         </Card>
+        <Card className="space-y-2">
+          <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">{t("leadDatabase.total")}</p>
+          <p className="text-3xl font-bold text-slate-900">{totals.total}</p>
+        </Card>
       </div>
 
       <Card className="space-y-4">
         <CardTitle>{t("leadDatabase.filters")}</CardTitle>
-        <div className="grid gap-3 md:grid-cols-7">
+        <div className="grid gap-3 md:grid-cols-10">
           <Input placeholder={t("leadDatabase.product")} value={productFilter} onChange={(e) => setProductFilter(e.target.value)} />
           <Select value={roleFilter} onChange={(e) => setRoleFilter(e.target.value)}>
             <option value="">{t("leadDatabase.allRoles")}</option>
@@ -308,6 +371,12 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
             <option value="exporter">{t("leadDatabase.role.exporter")}</option>
             <option value="manufacturer">{t("leadDatabase.role.manufacturer")}</option>
             <option value="trader">{t("leadDatabase.role.trader")}</option>
+          </Select>
+          <Select value={tierFilter} onChange={(e) => setTierFilter(e.target.value)}>
+            <option value="">{t("leadDatabase.tierAny")}</option>
+            <option value="ready">{t("leadDatabase.tier.ready")}</option>
+            <option value="actionable">{t("leadDatabase.tier.actionable")}</option>
+            <option value="signal">{t("leadDatabase.tier.signal")}</option>
           </Select>
           <Input placeholder={t("leadDatabase.country")} value={countryFilter} onChange={(e) => setCountryFilter(e.target.value)} />
           <Select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
@@ -331,6 +400,16 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
             <option value="yes">{t("leadDatabase.hasContactYes")}</option>
             <option value="no">{t("leadDatabase.hasContactNo")}</option>
           </Select>
+          <Select value={hasEmailFilter} onChange={(e) => setHasEmailFilter(e.target.value)}>
+            <option value="">{t("leadDatabase.hasEmailAny")}</option>
+            <option value="yes">{t("leadDatabase.hasEmailYes")}</option>
+            <option value="no">{t("leadDatabase.hasEmailNo")}</option>
+          </Select>
+          <Select value={hasPhoneFilter} onChange={(e) => setHasPhoneFilter(e.target.value)}>
+            <option value="">{t("leadDatabase.hasPhoneAny")}</option>
+            <option value="yes">{t("leadDatabase.hasPhoneYes")}</option>
+            <option value="no">{t("leadDatabase.hasPhoneNo")}</option>
+          </Select>
           <Select value={hasVolumeFilter} onChange={(e) => setHasVolumeFilter(e.target.value)}>
             <option value="">{t("leadDatabase.hasVolumeAny")}</option>
             <option value="yes">{t("leadDatabase.hasVolumeYes")}</option>
@@ -349,6 +428,7 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
             <THead>
               <TR>
                 <TH>{t("leadDatabase.company")}</TH>
+                <TH>{t("leadDatabase.tier")}</TH>
                 <TH>{t("leadDatabase.role")}</TH>
                 <TH>{t("leadDatabase.country")}</TH>
                 <TH>{t("leadDatabase.product")}</TH>
@@ -360,6 +440,7 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
                 <TH>{t("leadDatabase.source")}</TH>
                 <TH>{t("leadDatabase.confidence")}</TH>
                 <TH>{t("leadDatabase.whyMatched")}</TH>
+                <TH>{t("common.actions")}</TH>
               </TR>
             </THead>
             <TBody>
@@ -372,6 +453,11 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
                         {t("leadDatabase.openLead")}
                       </Link>
                     </div>
+                  </TD>
+                  <TD>
+                    <Badge variant={item.tier === "ready" ? "success" : item.tier === "actionable" ? "warning" : "default"}>
+                      {t(`leadDatabase.tier.${item.tier}`)}
+                    </Badge>
                   </TD>
                   <TD>
                     <Badge variant={roleVariant(item.role)}>{t(`leadDatabase.role.${item.role}`)}</Badge>
@@ -427,6 +513,22 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
                             </Badge>
                           ))
                         : t("common.noData")}
+                    </div>
+                  </TD>
+                  <TD>
+                    <div className="space-y-1">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        className="h-8 px-3 text-xs"
+                        disabled={contactLoadingId === item.leadId}
+                        onClick={() => void findContact(item.leadId)}
+                      >
+                        {contactLoadingId === item.leadId ? t("leadDatabase.findingContact") : t("leadDatabase.findContact")}
+                      </Button>
+                      {contactActionState[item.leadId] ? (
+                        <p className="max-w-[180px] text-[11px] text-slate-500">{contactActionState[item.leadId]}</p>
+                      ) : null}
                     </div>
                   </TD>
                 </TR>

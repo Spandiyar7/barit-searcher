@@ -39,6 +39,12 @@ export type AntiBotRisk = "low" | "medium" | "high";
 export type ParseStatus = "success" | "empty" | "failed" | "skipped";
 
 export type SourceStatus = "ok" | "blocked" | "error" | "manual";
+export type SourceDiagnosticCode =
+  | "ok"
+  | "no_adapter"
+  | "source_native_failure"
+  | "fallback_blocked"
+  | "empty_results";
 
 export type SourceId =
   | "petrochemz"
@@ -204,6 +210,8 @@ export type SourceDiagnostic = {
   source_id: SourceId;
   source_name: string;
   priority_tier?: SourcePriorityTier;
+  diagnostic_code?: SourceDiagnosticCode;
+  acquisition_path?: "native" | "native_plus_fallback" | "fallback_only" | "none";
   status: SourceStatus;
   execution_mode: SourceExecutionMode;
   attempted_modes: SourceExecutionMode[];
@@ -217,6 +225,18 @@ export type SourceDiagnostic = {
   warnings: string[];
   open_source_url: string | null;
   save_search_url: string | null;
+};
+
+export type SourceExecutionTrace = {
+  source_id: SourceId;
+  no_adapter: boolean;
+  native_attempted: boolean;
+  native_success: boolean;
+  fallback_attempted: boolean;
+  fallback_success: boolean;
+  fallback_blocked: boolean;
+  fallback_error: boolean;
+  empty_results: boolean;
 };
 
 export type MarketIntelligenceSearchResponse = {

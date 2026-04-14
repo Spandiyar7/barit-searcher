@@ -4,6 +4,7 @@ import { getSearchJobSnapshot, type JobResultItem, type SearchIntent } from "@/l
 import { getSourcePerformanceDashboardData } from "@/lib/services/source-performance";
 
 export type LeadDatabaseRole = "buyer" | "supplier" | "importer" | "exporter" | "manufacturer" | "trader";
+export type LeadDatabaseTier = "ready" | "actionable" | "signal";
 
 export type WhyMatchedCode =
   | "roleRelevance"
@@ -34,8 +35,11 @@ export type LeadDatabaseItem = {
   sourceUrl: string;
   confidenceScore: number;
   rankingScore: number;
+  tier: LeadDatabaseTier;
   whyMatched: WhyMatchedCode[];
   hasContact: boolean;
+  hasEmail: boolean;
+  hasPhone: boolean;
   hasVolume: boolean;
   searchJobId: string | null;
   createdAt: string;
@@ -52,6 +56,7 @@ export type LeadDatabaseSnapshot = {
   };
   totals: {
     readyLeads: number;
+    actionableLeads: number;
     withContacts: number;
     withVolume: number;
     averageConfidence: number;
@@ -67,13 +72,18 @@ export type LeadDatabaseListFilters = {
   source?: string;
   confidence?: number;
   has_contact?: boolean;
+  has_email?: boolean;
+  has_phone?: boolean;
   has_volume?: boolean;
+  tier?: LeadDatabaseTier;
   limit?: number;
 };
 
 export type LeadDatabaseListResponse = {
   totals: {
     total: number;
+    readyLeads: number;
+    actionableLeads: number;
     withContacts: number;
     withVolume: number;
     averageConfidence: number;
@@ -199,6 +209,17 @@ const buildWhyMatched = (payload: {
   if (payload.productMatch) reasons.push("productMatch");
   if (payload.repeatedSignals) reasons.push("repeatedSourceSignals");
   return reasons;
+};
+
+const classifyTier = (payload: {
+  confidenceScore: number;
+  hasContact: boolean;
+  hasCompany: boolean;
+  signalScore: number;
+}) => {
+  if (payload.confidenceScore >= 72 && payload.hasContact) return "ready" as const;
+  if (payload.confidenceScore >= 58 && payload.hasCompany && payload.signalScore >= 0.45) return "actionable" as const;
+  return "signal" as const;
 };
 
 const parseNormalizedResultFromRaw = (value: Prisma.JsonValue | null): JobResultItem | null => {
@@ -338,6 +359,9 @@ const toLeadDatabaseItem = (input: {
   const hasVolume = Boolean(input.lead.volume || input.result?.quantity);
   const volume = toVolumeLabel(input.lead.volume, input.lead.unit) || input.result?.quantity || null;
   const hasContact = Boolean(contactPerson || email || phone || telegram || whatsapp);
+  const hasEmail = Boolean(email);
+  const hasPhone = Boolean(phone);
+  const hasCompany = Boolean((input.lead.company?.name || input.result?.company || "").trim());
 
   const roleScore = roleRelevance(input.parsedIntent, role);
   const companyKey = normalizeCompanyKey(input.lead.company?.name || input.result?.company);
@@ -372,6 +396,12 @@ const toLeadDatabaseItem = (input: {
     productMatch: productMatched,
     repeatedSignals
   });
+  const tier = classifyTier({
+    confidenceScore: Number((confidence * 100).toFixed(2)),
+    hasContact,
+    hasCompany,
+    signalScore
+  });
 
   return {
     id: input.lead.id,
@@ -392,8 +422,11 @@ const toLeadDatabaseItem = (input: {
     sourceUrl,
     confidenceScore: Number((confidence * 100).toFixed(2)),
     rankingScore: Number((Math.max(0.01, Math.min(0.99, ranking)) * 100).toFixed(2)),
+    tier,
     whyMatched,
     hasContact,
+    hasEmail,
+    hasPhone,
     hasVolume,
     searchJobId: input.searchJobId,
     createdAt: input.lead.createdAt.toISOString()
@@ -449,7 +482,7 @@ export const getLeadDatabaseSnapshot = async (jobId: string): Promise<LeadDataba
     orderBy: { createdAt: "desc" }
   });
 
-  const items = dedupeItems(
+  const allItems = dedupeItems(
     leads.map((lead) =>
       toLeadDatabaseItem({
         lead,
@@ -462,8 +495,10 @@ export const getLeadDatabaseSnapshot = async (jobId: string): Promise<LeadDataba
         searchJobId: snapshot.job.id
       })
     )
-  )
-    .filter((item) => item.confidenceScore >= 56 && item.company !== "Unknown company")
+  ).filter((item) => item.confidenceScore >= 56 && item.company !== "Unknown company");
+
+  const items = allItems
+    .filter((item) => item.tier === "ready" || item.tier === "actionable")
     .sort((a, b) => b.rankingScore - a.rankingScore || b.confidenceScore - a.confidenceScore)
     .slice(0, 400);
 
@@ -479,7 +514,8 @@ export const getLeadDatabaseSnapshot = async (jobId: string): Promise<LeadDataba
       targetCountry: snapshot.parsed_query.target_country_or_region
     },
     totals: {
-      readyLeads: items.length,
+      readyLeads: items.filter((item) => item.tier === "ready").length,
+      actionableLeads: items.filter((item) => item.tier === "actionable").length,
       withContacts: items.filter((item) => item.hasContact).length,
       withVolume: items.filter((item) => item.hasVolume).length,
       averageConfidence: items.length > 0 ? Number((totalConfidence / items.length).toFixed(2)) : 0
@@ -531,7 +567,7 @@ export const listLeadDatabaseEntries = async (filters: LeadDatabaseListFilters):
 
   const sourceQualityMap = await getSourceQualityMap();
 
-  const items = dedupeItems(
+  const allItems = dedupeItems(
     leads.map((lead) => {
       const raw = lead.rawMarketLeads[0];
       const result = parseNormalizedResultFromRaw((raw?.normalized as Prisma.JsonValue) || null);
@@ -546,11 +582,19 @@ export const listLeadDatabaseEntries = async (filters: LeadDatabaseListFilters):
         searchJobId: null
       });
     })
-  )
+  );
+
+  const items = allItems
+    .filter((item) => item.tier === "ready" || item.tier === "actionable")
     .filter((item) => {
       if (filters.role && item.role !== filters.role) return false;
+      if (filters.tier && item.tier !== filters.tier) return false;
       if (filters.has_contact === true && !item.hasContact) return false;
       if (filters.has_contact === false && item.hasContact) return false;
+      if (filters.has_email === true && !item.hasEmail) return false;
+      if (filters.has_email === false && item.hasEmail) return false;
+      if (filters.has_phone === true && !item.hasPhone) return false;
+      if (filters.has_phone === false && item.hasPhone) return false;
       if (typeof filters.confidence === "number" && item.confidenceScore < filters.confidence) return false;
       if (filters.country && !(item.country || "").toLowerCase().includes(filters.country.toLowerCase())) return false;
       if (filters.product && !(item.product || "").toLowerCase().includes(filters.product.toLowerCase())) return false;
@@ -564,6 +608,8 @@ export const listLeadDatabaseEntries = async (filters: LeadDatabaseListFilters):
   return {
     totals: {
       total: items.length,
+      readyLeads: items.filter((item) => item.tier === "ready").length,
+      actionableLeads: items.filter((item) => item.tier === "actionable").length,
       withContacts: items.filter((item) => item.hasContact).length,
       withVolume: items.filter((item) => item.hasVolume).length,
       averageConfidence: items.length > 0 ? Number((totalConfidence / items.length).toFixed(2)) : 0

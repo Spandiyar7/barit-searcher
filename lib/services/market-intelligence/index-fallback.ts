@@ -19,7 +19,7 @@ type SearchCandidate = {
 };
 
 type SearchProviderResult = {
-  provider: "brave" | "duckduckgo";
+  provider: "brave" | "bing";
   queryUrl: string;
   candidates: SearchCandidate[];
   httpStatus?: number | null;
@@ -107,19 +107,6 @@ const toHost = (value: string) => {
     return new URL(withProtocol).hostname.toLowerCase().replace(/^www\./, "");
   } catch {
     return normalized.toLowerCase().replace(/^www\./, "").replace(/^https?:\/\//, "").split("/")[0];
-  }
-};
-
-const decodeDuckRedirect = (href: string) => {
-  const absolute = href.startsWith("http") ? href : `https://duckduckgo.com${href}`;
-
-  try {
-    const parsed = new URL(absolute);
-    const uddg = parsed.searchParams.get("uddg");
-    if (uddg) return decodeURIComponent(uddg);
-    return absolute;
-  } catch {
-    return absolute;
   }
 };
 
@@ -224,8 +211,8 @@ const searchWithBrave = async (query: string): Promise<SearchProviderResult> => 
   };
 };
 
-const searchWithDuckDuckGo = async (query: string): Promise<SearchProviderResult> => {
-  const queryUrl = `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
+const searchWithBing = async (query: string): Promise<SearchProviderResult> => {
+  const queryUrl = `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
   const response = await fetchWithTimeout(queryUrl, {
     accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "accept-language": "en-US,en;q=0.8",
@@ -233,34 +220,32 @@ const searchWithDuckDuckGo = async (query: string): Promise<SearchProviderResult
   });
 
   if (!response.ok) {
-    throw new Error(`DuckDuckGo returned ${response.status}`);
+    throw new Error(`Bing returned ${response.status}`);
   }
 
   const html = await response.text();
   const $ = load(html);
   const candidates: SearchCandidate[] = [];
 
-  $("div.result").each((_, node) => {
+  $("li.b_algo").each((_, node) => {
     if (candidates.length >= 30) return;
 
-    const anchor = $(node).find("a.result__a").first();
+    const anchor = $(node).find("h2 a").first();
     const href = normalizeText(anchor.attr("href"));
     const title = normalizeText(anchor.text());
-    const snippet = normalizeText($(node).find(".result__snippet").first().text());
+    const snippet = normalizeText($(node).find(".b_caption p").first().text() || $(node).find("p").first().text());
     if (!href || !title) return;
-
-    const url = decodeDuckRedirect(href);
-    if (!url.startsWith("http")) return;
+    if (!href.startsWith("http")) return;
 
     candidates.push({
       title,
       snippet,
-      url
+      url: href
     });
   });
 
   return {
-    provider: "duckduckgo",
+    provider: "bing",
     queryUrl,
     candidates,
     httpStatus: response.status
@@ -332,23 +317,23 @@ const runSearchProvider = async (query: string): Promise<SearchProviderResult> =
     try {
       return await searchWithBrave(query);
     } catch {
-      return searchWithDuckDuckGo(query);
+      return searchWithBing(query);
     }
   }
 
-  if (preferred === "duckduckgo") {
-    return searchWithDuckDuckGo(query);
+  if (preferred === "bing") {
+    return searchWithBing(query);
   }
 
   if (process.env.BRAVE_SEARCH_API_KEY) {
     try {
       return await searchWithBrave(query);
     } catch {
-      return searchWithDuckDuckGo(query);
+      return searchWithBing(query);
     }
   }
 
-  return searchWithDuckDuckGo(query);
+  return searchWithBing(query);
 };
 
 export const runAutomatedSourceIndexFallback = async (input: {
@@ -369,6 +354,7 @@ export const runAutomatedSourceIndexFallback = async (input: {
   const aggregated = new Map<string, NormalizedMarketResult>();
   let lastResponseStatus: number | null = null;
   let parseStatus: "success" | "empty" | "failed" = "empty";
+  let blocked = false;
 
   for (const query of queries) {
     if (aggregated.size >= input.maxResults) break;
@@ -405,8 +391,12 @@ export const runAutomatedSourceIndexFallback = async (input: {
       }
     } catch (error) {
       parseStatus = parseStatus === "success" ? "success" : "failed";
+      const message = error instanceof Error ? error.message : "unknown error";
+      if (/\b(403|429|blocked|challenge|captcha|anti-bot)\b/i.test(message)) {
+        blocked = true;
+      }
       warnings.push(
-        `Automated fallback query failed for ${input.sourceName}: ${error instanceof Error ? error.message : "unknown error"}`
+        `Automated fallback query failed for ${input.sourceName}: ${message}`
       );
     }
   }
@@ -425,8 +415,8 @@ export const runAutomatedSourceIndexFallback = async (input: {
     warnings,
     http_statuses: httpStatuses,
     response_status: lastResponseStatus,
-    blocked: false,
-    anti_bot_detected: false,
+    blocked,
+    anti_bot_detected: blocked,
     parse_status: results.length > 0 ? "success" : parseStatus,
     status: results.length > 0 ? "ok" : "error",
     extracted_results: results.length,

@@ -20,6 +20,7 @@ import type {
   SearchJobSourceRun,
   SearchJobSummary,
   SourceDiagnostic,
+  SourceDiagnosticCode,
   SourceId,
   SourceRecommendation,
   SourceStatus
@@ -336,6 +337,20 @@ const buildSourceRunSnapshot = (run: {
   warnings: run.warnings
 });
 
+const inferDiagnosticCode = (payload: {
+  noAdapter: boolean;
+  fallbackBlocked: boolean;
+  nativeAttempted: boolean;
+  nativeSuccess: boolean;
+  extracted: number;
+}): SourceDiagnosticCode => {
+  if (payload.noAdapter) return "no_adapter";
+  if (payload.fallbackBlocked) return "fallback_blocked";
+  if (payload.nativeAttempted && !payload.nativeSuccess) return "source_native_failure";
+  if (payload.extracted === 0) return "empty_results";
+  return "ok";
+};
+
 const mapRunDiagnostics = (run: {
   sourceId: string;
   sourceName: string;
@@ -370,6 +385,8 @@ const mapRunDiagnostics = (run: {
     source_id: run.sourceId as SourceDiagnostic["source_id"],
     source_name: run.sourceName,
     priority_tier: recommendation?.priority_tier,
+    diagnostic_code: run.extractedResults > 0 ? "ok" : run.blocked ? "fallback_blocked" : "empty_results",
+    acquisition_path: run.executionMode === "manual" ? "fallback_only" : "native",
     status: fallbackStatus,
     execution_mode: run.executionMode as SourceDiagnostic["execution_mode"],
     attempted_modes: [run.executionMode as SourceDiagnostic["execution_mode"]],
@@ -567,6 +584,20 @@ export const processSearchJob = async (jobId: string) => {
         source_id: execution.result.sourceId,
         source_name: execution.result.sourceName,
         priority_tier: recommendation?.priority_tier ?? sourceMeta?.priorityTier,
+        diagnostic_code: inferDiagnosticCode({
+          noAdapter: execution.trace.no_adapter,
+          fallbackBlocked: execution.trace.fallback_blocked || execution.result.status === "blocked",
+          nativeAttempted: execution.trace.native_attempted,
+          nativeSuccess: execution.trace.native_success,
+          extracted: execution.result.extracted_results
+        }),
+        acquisition_path: execution.trace.native_attempted
+          ? execution.trace.fallback_attempted
+            ? "native_plus_fallback"
+            : "native"
+          : execution.trace.fallback_attempted
+            ? "fallback_only"
+            : "none",
         status: execution.result.status,
         execution_mode: execution.result.execution_mode,
         attempted_modes: execution.attempted_modes,

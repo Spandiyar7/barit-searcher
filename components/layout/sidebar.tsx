@@ -24,10 +24,10 @@ import { getTranslator } from "@/lib/i18n/dictionaries";
 import type { Locale } from "@/lib/i18n/config";
 
 const primaryNavItems = [
-  { href: "/dashboard", key: "nav.dashboard", icon: LayoutDashboard },
   { href: "/lead-database", key: "nav.leadDatabase", icon: Users },
   { href: "/lead-discovery", key: "nav.leadDiscovery", icon: Sparkles },
   { href: "/trade-intelligence", key: "nav.tradeIntelligence", icon: Compass },
+  { href: "/dashboard", key: "nav.dashboard", icon: LayoutDashboard },
   { href: "/companies", key: "nav.companies", icon: Building2 },
   { href: "/contacts", key: "nav.contacts", icon: Contact2 },
   { href: "/leads", key: "nav.leads", icon: RadioTower },

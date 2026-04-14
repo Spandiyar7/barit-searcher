@@ -11,10 +11,13 @@ export async function GET(request: NextRequest) {
       q: searchParams.get("q") || "",
       product: searchParams.get("product") || "",
       role: searchParams.get("role") || undefined,
+      tier: searchParams.get("tier") || undefined,
       country: searchParams.get("country") || "",
       source: searchParams.get("source") || "",
       confidence: searchParams.get("confidence") || undefined,
       has_contact: searchParams.get("has_contact") || undefined,
+      has_email: searchParams.get("has_email") || undefined,
+      has_phone: searchParams.get("has_phone") || undefined,
       has_volume: searchParams.get("has_volume") || undefined,
       limit: searchParams.get("limit") || undefined
     });
@@ -23,10 +26,13 @@ export async function GET(request: NextRequest) {
       q: payload.q || undefined,
       product: payload.product || undefined,
       role: payload.role,
+      tier: payload.tier,
       country: payload.country || undefined,
       source: payload.source || undefined,
       confidence: payload.confidence,
       has_contact: payload.has_contact,
+      has_email: payload.has_email,
+      has_phone: payload.has_phone,
       has_volume: payload.has_volume,
       limit: payload.limit
     });
