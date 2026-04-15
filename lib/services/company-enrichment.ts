@@ -15,6 +15,14 @@ export type CompanyEnrichment = {
   specialization: string | null;
   description: string | null;
   fetchedFromSourcePage: boolean;
+  websiteResolvedBySearch: boolean;
+  websiteCrawled: boolean;
+};
+
+type EnrichmentOptions = {
+  preferDirectWebsite?: boolean;
+  companyCountry?: string | null;
+  productHint?: string | null;
 };
 
 const MARKETPLACE_HOST_HINTS = [
@@ -34,6 +42,8 @@ const MARKETPLACE_HOST_HINTS = [
 ];
 
 const CONTACT_PATHS = ["/contact", "/contact-us", "/about", "/about-us", "/company", "/company-profile", "/team"];
+const SEARCH_TIMEOUT_MS = 10_000;
+const SEARCH_USER_AGENT = "Mozilla/5.0 (compatible; CommodityTradingCRM/1.0; +https://example.com/contact)";
 
 type Signals = {
   urls: Set<string>;
@@ -43,6 +53,7 @@ type Signals = {
   whatsapps: Set<string>;
   contactNames: Set<string>;
   contactPages: Set<string>;
+  countries: Set<string>;
 };
 
 const toAbsoluteUrl = (href: string, base: string) => {
@@ -54,6 +65,22 @@ const toAbsoluteUrl = (href: string, base: string) => {
 };
 
 const isLikelyMarketplaceHost = (value: string) => MARKETPLACE_HOST_HINTS.some((hint) => value.includes(hint));
+
+const isLikelySocialHost = (value: string) =>
+  /(facebook|instagram|linkedin|twitter|x\.com|youtube|t\.me|telegram|wa\.me|whatsapp)/i.test(value);
+
+const normalizeCompanyToken = (value: string) =>
+  normalizeText(value)
+    .toLowerCase()
+    .replace(
+      /\b(llc|ltd|limited|inc|corp|corporation|co|company|gmbh|sarl|sas|sa|ag|bv|pte|fze|dmcc|oy|srl)\b/g,
+      " "
+    )
+    .replace(/[^a-z0-9\s]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const websiteResolutionCache = new Map<string, string | null>();
 
 const parseUrls = (text: string) => {
   const matches = text.match(/(?:https?:\/\/|www\.)[^\s<>"')]+/gi) || [];
@@ -140,6 +167,153 @@ const parseContactName = (text: string) => {
   return match?.[1] ? normalizeText(match[1]) : null;
 };
 
+const parseCountry = (text: string) => {
+  const normalized = normalizeText(text);
+  if (!normalized) return null;
+
+  const direct =
+    normalized.match(/\b(?:country|location|based in|located in|origin)\s*[:\-]?\s*([A-Za-z][A-Za-z\s().,&-]{2,60})/i)?.[1] ||
+    null;
+  if (direct) return normalizeText(direct).replace(/[.;,:]+$/, "");
+
+  const suffix = normalized.match(
+    /\b(?:United States|USA|UAE|United Arab Emirates|Turkey|India|China|Kazakhstan|Uzbekistan|Russia|Saudi Arabia|Egypt|Pakistan|Vietnam|Indonesia|Thailand|Kyrgyzstan|Tajikistan|Germany|France|Italy|Spain|Poland|Netherlands|United Kingdom)\b/i
+  )?.[0];
+  return suffix ? normalizeText(suffix) : null;
+};
+
+const scoreWebsiteForCompany = (payload: {
+  companyName: string;
+  country: string | null;
+  url: string;
+  title: string;
+  snippet: string;
+}) => {
+  const companyToken = normalizeCompanyToken(payload.companyName);
+  if (!companyToken) return 0;
+  const words = companyToken.split(" ").filter((item) => item.length >= 3);
+  if (words.length === 0) return 0;
+
+  let host = "";
+  try {
+    host = new URL(payload.url).hostname.replace(/^www\./i, "").toLowerCase();
+  } catch {
+    return 0;
+  }
+
+  if (!host || isLikelyMarketplaceHost(host) || isLikelySocialHost(host)) return 0;
+
+  const text = `${host} ${payload.title} ${payload.snippet}`.toLowerCase();
+  const matched = words.filter((word) => text.includes(word)).length;
+  let score = matched / words.length;
+
+  if (payload.country && text.includes(payload.country.toLowerCase())) score += 0.2;
+  if (/\bcontact|about|company|official\b/.test(text)) score += 0.08;
+  if (/wikipedia|facebook|linkedin|instagram/.test(host)) score -= 0.4;
+
+  return Math.max(0, Math.min(score, 1));
+};
+
+const fetchSearchHtml = async (url: string) => {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "user-agent": SEARCH_USER_AGENT,
+        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "accept-language": "en-US,en;q=0.8"
+      },
+      redirect: "follow",
+      cache: "no-store",
+      signal: controller.signal
+    });
+    if (!response.ok) return null;
+    return await response.text();
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
+
+const searchCompanyWebsiteByBing = async (payload: { companyName: string; country: string | null; productHint: string | null }) => {
+  const queries = [
+    [payload.companyName, payload.country || "", "official website"].filter(Boolean).join(" ").trim(),
+    [payload.companyName, payload.country || "", "contact"].filter(Boolean).join(" ").trim(),
+    [payload.companyName, payload.productHint || ""].filter(Boolean).join(" ").trim()
+  ]
+    .filter(Boolean)
+    .slice(0, 3);
+
+  const candidates: Array<{ url: string; score: number }> = [];
+
+  for (const query of queries) {
+    const html = await fetchSearchHtml(`https://www.bing.com/search?q=${encodeURIComponent(query)}`);
+    if (!html) continue;
+    const $ = load(html);
+    $("li.b_algo").each((_, node) => {
+      if (candidates.length >= 18) return;
+      const anchor = $(node).find("h2 a").first();
+      const href = normalizeText(anchor.attr("href"));
+      const title = normalizeText(anchor.text());
+      const snippet = normalizeText($(node).find(".b_caption p").first().text() || $(node).find("p").first().text());
+      if (!href || !href.startsWith("http")) return;
+      const score = scoreWebsiteForCompany({
+        companyName: payload.companyName,
+        country: payload.country,
+        url: href,
+        title,
+        snippet
+      });
+      if (score < 0.25) return;
+      candidates.push({ url: href, score });
+    });
+
+    if (candidates.length >= 8) break;
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  return Array.from(new Set(candidates.map((item) => item.url))).slice(0, 5);
+};
+
+const resolveCompanyWebsite = async (payload: { companyName: string; country: string | null; productHint: string | null }) => {
+  const companyName = normalizeText(payload.companyName);
+  if (companyName.length < 3) return null;
+
+  const cacheKey = `${companyName.toLowerCase()}|${normalizeText(payload.country || "").toLowerCase()}|${normalizeText(
+    payload.productHint || ""
+  ).toLowerCase()}`;
+  if (websiteResolutionCache.has(cacheKey)) {
+    return websiteResolutionCache.get(cacheKey) || null;
+  }
+
+  const candidates = await searchCompanyWebsiteByBing(payload);
+  if (!candidates.length) {
+    websiteResolutionCache.set(cacheKey, null);
+    return null;
+  }
+
+  for (const candidate of candidates) {
+    try {
+      const { html } = await fetchPublicHtml(candidate);
+      const visible = extractVisibleTextFromHtml(html).toLowerCase();
+      const tokens = normalizeCompanyToken(companyName).split(" ").filter((item) => item.length >= 3);
+      const matched = tokens.filter((token) => visible.includes(token)).length;
+      if (tokens.length === 0 || matched / Math.max(tokens.length, 1) >= 0.35) {
+        websiteResolutionCache.set(cacheKey, candidate);
+        return candidate;
+      }
+    } catch {
+      // continue to next candidate
+    }
+  }
+
+  websiteResolutionCache.set(cacheKey, candidates[0] || null);
+  return candidates[0] || null;
+};
+
 const pickCompanyWebsite = (urls: string[], sourceUrl: string) => {
   const sourceHost = (() => {
     try {
@@ -183,7 +357,8 @@ const initSignals = (): Signals => ({
   telegrams: new Set<string>(),
   whatsapps: new Set<string>(),
   contactNames: new Set<string>(),
-  contactPages: new Set<string>()
+  contactPages: new Set<string>(),
+  countries: new Set<string>()
 });
 
 const addTextSignals = (signals: Signals, text: string) => {
@@ -194,6 +369,8 @@ const addTextSignals = (signals: Signals, text: string) => {
   parseWhatsApp(text).forEach((whatsapp) => signals.whatsapps.add(whatsapp));
   const contactName = parseContactName(text);
   if (contactName) signals.contactNames.add(contactName);
+  const country = parseCountry(text);
+  if (country) signals.countries.add(country);
 };
 
 const addJsonLdSignals = (signals: Signals, html: string, pageUrl: string) => {
@@ -224,6 +401,20 @@ const addJsonLdSignals = (signals: Signals, html: string, pageUrl: string) => {
           if (typeof obj.url === "string") {
             const abs = toAbsoluteUrl(obj.url, pageUrl);
             if (abs) signals.urls.add(abs);
+          }
+          if (typeof obj.addressCountry === "string") {
+            const country = normalizeText(obj.addressCountry);
+            if (country) signals.countries.add(country);
+          }
+          if (typeof obj.address === "string") {
+            const country = parseCountry(obj.address);
+            if (country) signals.countries.add(country);
+          } else if (obj.address && typeof obj.address === "object") {
+            const addressObj = obj.address as Record<string, unknown>;
+            if (typeof addressObj.addressCountry === "string") {
+              const country = normalizeText(addressObj.addressCountry);
+              if (country) signals.countries.add(country);
+            }
           }
 
           const contactPoint = obj.contactPoint;
@@ -327,13 +518,16 @@ const crawlWebsiteContacts = async (website: string, signals: Signals) => {
 };
 
 export const enrichCompanyFromMarketResult = async (
-  result: NormalizedMarketResult
+  result: NormalizedMarketResult,
+  options: EnrichmentOptions = {}
 ): Promise<CompanyEnrichment> => {
   const signals = initSignals();
   const localText = normalizeText([result.raw_text, result.description].filter(Boolean).join("\n"));
   addTextSignals(signals, localText);
 
   let fetchedFromSourcePage = false;
+  let websiteResolvedBySearch = false;
+  let websiteCrawled = false;
 
   try {
     const { html } = await fetchPublicHtml(result.source_url);
@@ -344,12 +538,39 @@ export const enrichCompanyFromMarketResult = async (
   }
 
   let website = pickCompanyWebsite(Array.from(signals.urls), result.source_url);
+  const weakStructure =
+    !website &&
+    signals.emails.size === 0 &&
+    signals.phones.size === 0 &&
+    signals.whatsapps.size === 0 &&
+    signals.telegrams.size === 0;
+  const weakContactCoverage =
+    signals.emails.size === 0 &&
+    signals.phones.size === 0 &&
+    signals.whatsapps.size === 0 &&
+    signals.telegrams.size === 0 &&
+    signals.contactNames.size === 0;
+
+  const shouldResolveWebsite = result.company && (weakStructure || (options.preferDirectWebsite && weakContactCoverage));
+  if (shouldResolveWebsite) {
+    const resolved = await resolveCompanyWebsite({
+      companyName: result.company,
+      country: options.companyCountry || result.country || null,
+      productHint: options.productHint || result.product || null
+    });
+    if (resolved) {
+      signals.urls.add(resolved);
+      website = resolved;
+      websiteResolvedBySearch = true;
+    }
+  }
 
   if (website) {
     try {
       await crawlWebsiteContacts(website, signals);
       const upgraded = pickCompanyWebsite(Array.from(signals.urls), result.source_url);
       if (upgraded) website = upgraded;
+      websiteCrawled = true;
     } catch {
       // non-blocking
     }
@@ -364,10 +585,11 @@ export const enrichCompanyFromMarketResult = async (
     whatsapp: pickFromSet(signals.whatsapps),
     contactName: result.contact_name || pickFromSet(signals.contactNames),
     contactPageUrl: pickFromSet(signals.contactPages),
-    country: result.country || null,
+    country: result.country || pickFromSet(signals.countries),
     specialization: result.product || null,
     description: mergeDescription(result) || null,
-    fetchedFromSourcePage
+    fetchedFromSourcePage,
+    websiteResolvedBySearch,
+    websiteCrawled
   };
 };
-

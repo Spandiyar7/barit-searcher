@@ -5,6 +5,7 @@ import { prisma } from "@/lib/db/prisma";
 import { enrichCompanyFromMarketResult, type CompanyEnrichment } from "@/lib/services/company-enrichment";
 import { findProductByNameOrSynonym } from "@/lib/services/products";
 import { withOriginMeta } from "./source-origin";
+import { findMatchingLeadBySignals, updateExistingLeadFromResult } from "./dedupe";
 import { extractVisibleTextFromHtml, fetchPublicHtml, normalizeText as normalizeSharedText } from "./engines/shared";
 import type {
   MarketIntelligenceImportInput,
@@ -468,7 +469,16 @@ const normalizedFromRawPayload = (value: Prisma.JsonValue | null): NormalizedMar
         : undefined,
     ai_summary: typeof payload.ai_summary === "string" ? payload.ai_summary : null,
     relevance_score: typeof payload.relevance_score === "number" ? payload.relevance_score : undefined,
-    next_action: typeof payload.next_action === "string" ? payload.next_action : null
+    next_action: typeof payload.next_action === "string" ? payload.next_action : null,
+    acquisition_origin:
+      typeof payload.acquisition_origin === "string" &&
+      ["directory_page", "company_website", "browser_fallback", "unknown"].includes(payload.acquisition_origin)
+        ? (payload.acquisition_origin as NormalizedMarketResult["acquisition_origin"])
+        : undefined,
+    contact_completeness_score:
+      typeof payload.contact_completeness_score === "number" && Number.isFinite(payload.contact_completeness_score)
+        ? Math.max(0, Math.min(payload.contact_completeness_score, 1))
+        : undefined
   };
 };
 
@@ -640,12 +650,38 @@ export const importMarketIntelligenceLead = async (
   if (!sourceUrl) throw new Error("Source URL is required for import.");
   const saveCompany = input.save_company ?? true;
 
-  const duplicate = await prisma.lead.findFirst({
-    where: { sourceUrl: { equals: sourceUrl, mode: "insensitive" } },
-    select: { id: true, companyId: true }
+  const matchedLead = await findMatchingLeadBySignals({
+    source_url: sourceUrl,
+    source_name: input.result.source_name,
+    company: input.result.company,
+    product: input.result.product,
+    description: input.result.description,
+    raw_text: input.result.raw_text,
+    country: input.result.country,
+    contact_name: input.result.contact_name
   });
 
+  const duplicate = matchedLead
+    ? await prisma.lead.findUnique({
+        where: { id: matchedLead.leadId },
+        select: { id: true, companyId: true }
+      })
+    : null;
+
   if (duplicate) {
+    await updateExistingLeadFromResult(duplicate.id, {
+      source_url: sourceUrl,
+      source_name: input.result.source_name,
+      description: input.result.description,
+      raw_text: input.result.raw_text,
+      country: input.result.country,
+      destination: input.result.destination,
+      payment_terms: input.result.payment_terms,
+      incoterms: input.result.incoterms,
+      ai_summary: input.result.ai_summary,
+      contact_name: input.result.contact_name
+    });
+
     if (saveCompany) {
       try {
         const enrichment = await enrichCompanyFromMarketResult(input.result);

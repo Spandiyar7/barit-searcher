@@ -83,7 +83,16 @@ const localizeSourceReason = (reason: string, t: (key: string, fallback?: string
     { pattern: /Manual mode penalty/gi, key: "marketIntelligence.reason.manualPenalty" },
     { pattern: /High anti-bot risk/gi, key: "marketIntelligence.reason.highAntiBotRisk" },
     { pattern: /Fallback-only for specialized commodity queries/gi, key: "marketIntelligence.reason.fallbackOnlySpecialized" },
-    { pattern: /Specialized Tier 1 match/gi, key: "marketIntelligence.reason.specializedTier1" }
+    { pattern: /Specialized Tier 1 match/gi, key: "marketIntelligence.reason.specializedTier1" },
+    { pattern: /Detected category food_agriculture/gi, key: "marketIntelligence.reason.detectedFoodCategory" },
+    { pattern: /Food\/agri priority source/gi, key: "marketIntelligence.reason.foodAgriPrioritySource" },
+    { pattern: /Food\/agri directory boost/gi, key: "marketIntelligence.reason.foodAgriDirectoryBoost" },
+    { pattern: /Food\/agri mismatch penalty/gi, key: "marketIntelligence.reason.foodAgriMismatchPenalty" },
+    { pattern: /Food\/agri RFQ penalty/gi, key: "marketIntelligence.reason.foodAgriRfqPenalty" },
+    { pattern: /Company-first website priority/gi, key: "marketIntelligence.reason.companyFirstWebsitePriority" },
+    { pattern: /Local directory priority/gi, key: "marketIntelligence.reason.localDirectoryPriority" },
+    { pattern: /Business listing priority/gi, key: "marketIntelligence.reason.businessListingPriority" },
+    { pattern: /Directory fallback for food\/agri/gi, key: "marketIntelligence.reason.directoryFallbackFoodAgri" }
   ];
 
   let localized = reason;
@@ -99,6 +108,16 @@ const diagnosticCodeClass = (code: SourceDiagnostic["diagnostic_code"]) => {
   if (code === "source_native_failure") return "bg-amber-100 text-amber-700";
   if (code === "no_adapter") return "bg-slate-200 text-slate-700";
   return "bg-slate-100 text-slate-600";
+};
+
+const localizeOrigin = (
+  origin: "directory_page" | "company_website" | "browser_fallback" | "unknown",
+  t: (key: string, fallback?: string) => string
+) => {
+  if (origin === "directory_page") return t("marketIntelligence.resultOrigin.directoryPage");
+  if (origin === "company_website") return t("marketIntelligence.resultOrigin.companyWebsite");
+  if (origin === "browser_fallback") return t("marketIntelligence.resultOrigin.browserFallback");
+  return t("marketIntelligence.resultOrigin.unknown");
 };
 
 export function MarketIntelligenceClient({ locale }: { locale: Locale }) {
@@ -690,6 +709,19 @@ export function MarketIntelligenceClient({ locale }: { locale: Locale }) {
                   </p>
                 </div>
 
+                {source.result_origins ? (
+                  <div className="mt-2 flex flex-wrap items-center gap-2 text-[11px] text-slate-600">
+                    <span className="font-medium text-slate-800">{t("marketIntelligence.resultOrigins")}:</span>
+                    {Object.entries(source.result_origins)
+                      .filter(([, count]) => Number(count) > 0)
+                      .map(([origin, count]) => (
+                        <span key={`${source.source_id}-${origin}`} className="rounded bg-slate-100 px-2 py-0.5">
+                          {localizeOrigin(origin as "directory_page" | "company_website" | "browser_fallback" | "unknown", t)}: {count}
+                        </span>
+                      ))}
+                  </div>
+                ) : null}
+
                 {source.selection_reason ? (
                   <p className="mt-2 text-xs text-slate-600">
                     <span className="font-medium text-slate-800">{t("marketIntelligence.selectedBecause")}:</span>{" "}
@@ -843,6 +875,18 @@ export function MarketIntelligenceClient({ locale }: { locale: Locale }) {
                 <p>
                   <span className="font-medium text-slate-900">{t("marketIntelligence.relevance")}:</span>{" "}
                   {Math.round((result.relevance_score || 0) * 100)}%
+                </p>
+                <p>
+                  <span className="font-medium text-slate-900">{t("marketIntelligence.contactCompleteness")}:</span>{" "}
+                  {typeof result.contact_completeness_score === "number"
+                    ? `${Math.round(result.contact_completeness_score * 100)}%`
+                    : "-"}
+                </p>
+                <p>
+                  <span className="font-medium text-slate-900">{t("marketIntelligence.resultOriginLabel")}:</span>{" "}
+                  {result.acquisition_origin
+                    ? localizeOrigin(result.acquisition_origin, t)
+                    : "-"}
                 </p>
               </div>
 

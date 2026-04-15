@@ -143,6 +143,27 @@ const inferAcquisitionPath = (trace: SourceExecutionTrace): SourceDiagnostic["ac
   return "none";
 };
 
+const shouldBrowserFallbackOnEmpty = (sourceId: SourceId) =>
+  sourceId === "kompass" || sourceId === "europages" || sourceId === "direct_websites";
+
+const computeResultOrigins = (results: SourceEngineResult["results"]): NonNullable<SourceDiagnostic["result_origins"]> =>
+  results.reduce(
+    (acc, item) => {
+      const origin = item.acquisition_origin || "unknown";
+      if (origin === "directory_page") acc.directory_page += 1;
+      else if (origin === "company_website") acc.company_website += 1;
+      else if (origin === "browser_fallback") acc.browser_fallback += 1;
+      else acc.unknown += 1;
+      return acc;
+    },
+    {
+      directory_page: 0,
+      company_website: 0,
+      browser_fallback: 0,
+      unknown: 0
+    }
+  );
+
 export const executeSourceWithFallback = async (
   sourceId: SourceId,
   parsedQuery: ParsedQuery,
@@ -267,7 +288,12 @@ export const executeSourceWithFallback = async (
   const shouldFallbackToBrowser =
     primaryMode === "fetch" &&
     source.browserCapable &&
-    (primary.blocked || primary.anti_bot_detected || primary.response_status === 403);
+    (primary.blocked ||
+      primary.anti_bot_detected ||
+      primary.response_status === 403 ||
+      (shouldBrowserFallbackOnEmpty(sourceId) &&
+        primary.results.length === 0 &&
+        (primary.parse_status === "empty" || primary.parse_status === "failed")));
 
   if (shouldFallbackToBrowser) {
     attemptedModes.push("browser");
@@ -282,7 +308,11 @@ export const executeSourceWithFallback = async (
         executionMode: "browser"
       })
     );
-    browserRun.warnings = [`${source.name}: fetch mode was blocked/challenged, attempted browser fallback.`, ...browserRun.warnings];
+    const fallbackReason =
+      primary.blocked || primary.anti_bot_detected || primary.response_status === 403
+        ? "fetch mode was blocked/challenged"
+        : "fetch mode returned empty/weak structure";
+    browserRun.warnings = [`${source.name}: ${fallbackReason}, attempted browser fallback.`, ...browserRun.warnings];
     runs.push(browserRun);
   }
 
@@ -376,6 +406,7 @@ export const buildSourceDiagnostics = (
       selection_reason: recommendation?.reason,
       warnings: result.warnings,
       open_source_url: result.fetchedUrls[0] || null,
-      save_search_url: result.fetchedUrls[0] || null
+      save_search_url: result.fetchedUrls[0] || null,
+      result_origins: computeResultOrigins(result.results)
     };
   });

@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 import { ZodError } from "zod";
-import { createSearchJob } from "@/lib/services/market-intelligence";
+import { createSearchJob, listSearchJobs } from "@/lib/services/market-intelligence";
 import { leadDatabaseCreateJobSchema } from "@/lib/validations/lead-database";
 import { apiError, apiOk, parseZodError } from "@/lib/utils/http";
 
@@ -28,6 +28,18 @@ export async function POST(request: NextRequest) {
     return apiOk(data);
   } catch (error) {
     if (error instanceof ZodError) return apiError(parseZodError(error), 400);
+    return apiError(parseZodError(error), 500);
+  }
+}
+
+export async function GET(request: NextRequest) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const limitRaw = Number(searchParams.get("limit") || "30");
+    const limit = Number.isFinite(limitRaw) ? limitRaw : 30;
+    const data = await listSearchJobs(limit);
+    return apiOk(data);
+  } catch (error) {
     return apiError(parseZodError(error), 500);
   }
 }

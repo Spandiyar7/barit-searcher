@@ -43,6 +43,42 @@ const SPECIALIZED_CATEGORIES = new Set<ProductCategory>([
   "industrial_minerals"
 ]);
 
+const FOOD_AGRICULTURE_PRIORITY_SOURCE_IDS = new Set<SourceId>([
+  "direct_websites",
+  "agroserver",
+  "flagma",
+  "agro_kg",
+  "tajagro",
+  "gieldarolna",
+  "satu_kz",
+  "all_biz",
+  "optlist",
+  "gratka",
+  "globy"
+]);
+
+const FOOD_AGRICULTURE_DEPRIORITIZED_SOURCE_IDS = new Set<SourceId>(["chemnet", "petrochemz", "plastic4trade"]);
+const FOOD_AGRICULTURE_LOCAL_DIRECTORY_SOURCE_IDS = new Set<SourceId>([
+  "agroserver",
+  "flagma",
+  "agro_kg",
+  "tajagro",
+  "gieldarolna",
+  "satu_kz",
+  "all_biz",
+  "optlist",
+  "gratka",
+  "avito",
+  "tiuru"
+]);
+const FOOD_AGRICULTURE_BUSINESS_LISTING_SOURCE_IDS = new Set<SourceId>([
+  "global_trade_plaza",
+  "globy",
+  "ec21",
+  "exporthub"
+]);
+const FOOD_AGRICULTURE_DIRECTORY_FALLBACK_SOURCE_IDS = new Set<SourceId>(["kompass", "europages"]);
+
 const QUERY_SOURCE_BOOST_RULES: Array<{
   pattern: RegExp;
   boosts: Partial<Record<SourceId, number>>;
@@ -89,6 +125,24 @@ const QUERY_SOURCE_BOOST_RULES: Array<{
       globy: 10,
       global_trade_plaza: 8,
       europages: 8
+    }
+  },
+  {
+    pattern: /sugar|white sugar|icumsa|iccumsa|sunflower oil|lentils?|chickpeas?|wheat|flour|grains?|pulses?/i,
+    boosts: {
+      direct_websites: 38,
+      agroserver: 24,
+      flagma: 22,
+      globy: 18,
+      agro_kg: 18,
+      tajagro: 18,
+      gieldarolna: 18,
+      satu_kz: 16,
+      all_biz: 16,
+      optlist: 14,
+      gratka: 12,
+      kompass: 6,
+      europages: 6
     }
   }
 ];
@@ -326,6 +380,7 @@ const scoreSource = (source: SourceDescriptor, parsedQuery: ParsedQuery, perf?: 
   let score = INTENT_GROUP_SCORES[parsedQuery.intent][source.group];
   const reasons: string[] = [];
   const specializedQuery = isSpecializedCommodityQuery(parsedQuery);
+  const foodAgricultureQuery = parsedQuery.product_category === "food_agriculture";
   const importerLikeIntent =
     parsedQuery.intent === "importers" ||
     parsedQuery.intent === "buyers" ||
@@ -336,6 +391,9 @@ const scoreSource = (source: SourceDescriptor, parsedQuery: ParsedQuery, perf?: 
 
   score += Math.round((source.defaultRankingWeight - 50) / 2);
   reasons.push(`Default weight ${source.defaultRankingWeight}`);
+  if (parsedQuery.product_category) {
+    reasons.push(`Detected category ${parsedQuery.product_category}`);
+  }
 
   if (source.priorityTier === 1) {
     score += specializedQuery ? 34 : 16;
@@ -355,6 +413,41 @@ const scoreSource = (source: SourceDescriptor, parsedQuery: ParsedQuery, perf?: 
     } else {
       score -= 18;
       reasons.push("Weak category fit");
+    }
+  }
+
+  if (foodAgricultureQuery) {
+    if (FOOD_AGRICULTURE_PRIORITY_SOURCE_IDS.has(source.id)) {
+      score += 34;
+      reasons.push("Food/agri priority source");
+    }
+    if (source.id === "direct_websites") {
+      score += 56;
+      reasons.push("Company-first website priority");
+    }
+    if (FOOD_AGRICULTURE_LOCAL_DIRECTORY_SOURCE_IDS.has(source.id)) {
+      score += 28;
+      reasons.push("Local directory priority");
+    }
+    if (FOOD_AGRICULTURE_BUSINESS_LISTING_SOURCE_IDS.has(source.id)) {
+      score += 14;
+      reasons.push("Business listing priority");
+    }
+    if (FOOD_AGRICULTURE_DIRECTORY_FALLBACK_SOURCE_IDS.has(source.id)) {
+      score -= 22;
+      reasons.push("Directory fallback for food/agri");
+    }
+    if (source.group === "directories" || source.group === "direct_websites") {
+      score += 12;
+      reasons.push("Food/agri directory boost");
+    }
+    if (FOOD_AGRICULTURE_DEPRIORITIZED_SOURCE_IDS.has(source.id)) {
+      score -= 80;
+      reasons.push("Food/agri mismatch penalty");
+    }
+    if (source.group === "rfq_platforms" && !FOOD_AGRICULTURE_PRIORITY_SOURCE_IDS.has(source.id)) {
+      score -= 14;
+      reasons.push("Food/agri RFQ penalty");
     }
   }
 
@@ -571,6 +664,7 @@ export const recommendSources = async (
   const selected: SourceRecommendation[] = [];
   const selectedIds = new Set<SourceId>();
   const specializedQuery = isSpecializedCommodityQuery(parsedQuery);
+  const foodAgricultureQuery = parsedQuery.product_category === "food_agriculture";
 
   const tryPush = (item: SourceRecommendation) => {
     if (selected.length >= limit) return;
@@ -594,6 +688,32 @@ export const recommendSources = async (
     if (shouldAllowFallback) {
       fallback.forEach(tryPush);
     }
+  } else if (foodAgricultureQuery) {
+    const companyFirst = prioritized
+      .filter((item) => item.source_id === "direct_websites")
+      .sort((a, b) => b.score - a.score);
+    const localDirectories = prioritized
+      .filter((item) => FOOD_AGRICULTURE_LOCAL_DIRECTORY_SOURCE_IDS.has(item.source_id))
+      .sort((a, b) => b.score - a.score);
+    const businessListings = prioritized
+      .filter((item) => FOOD_AGRICULTURE_BUSINESS_LISTING_SOURCE_IDS.has(item.source_id))
+      .sort((a, b) => b.score - a.score);
+    const directoryFallback = prioritized
+      .filter((item) => FOOD_AGRICULTURE_DIRECTORY_FALLBACK_SOURCE_IDS.has(item.source_id))
+      .sort((a, b) => b.score - a.score);
+    const remaining = prioritized.filter(
+      (item) =>
+        item.source_id !== "direct_websites" &&
+        !FOOD_AGRICULTURE_LOCAL_DIRECTORY_SOURCE_IDS.has(item.source_id) &&
+        !FOOD_AGRICULTURE_BUSINESS_LISTING_SOURCE_IDS.has(item.source_id) &&
+        !FOOD_AGRICULTURE_DIRECTORY_FALLBACK_SOURCE_IDS.has(item.source_id)
+    );
+
+    companyFirst.forEach(tryPush);
+    localDirectories.forEach(tryPush);
+    businessListings.forEach(tryPush);
+    remaining.forEach(tryPush);
+    directoryFallback.forEach(tryPush);
   } else {
     nonFallback.forEach(tryPush);
     fallback.forEach(tryPush);

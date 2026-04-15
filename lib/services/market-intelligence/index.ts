@@ -4,6 +4,8 @@ export {
   createSearchJob,
   ensureSearchJobRunning,
   getSearchJobSnapshot,
+  listSearchJobs,
+  rerunSearchJob,
   processSearchJob,
   createSavedSearch,
   listSavedSearches,
@@ -27,5 +29,6 @@ export type {
   SourceRecommendation,
   SourceDiagnostic,
   NormalizedMarketResult,
-  SearchIntent
+  SearchIntent,
+  SearchJobSummary
 } from "./types";

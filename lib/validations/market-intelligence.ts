@@ -39,7 +39,8 @@ export const parsedQuerySchema = z.object({
       "plastics",
       "chemicals",
       "fertilizers",
-      "industrial_minerals"
+      "industrial_minerals",
+      "food_agriculture"
     ])
     .nullable()
     .optional()
@@ -89,7 +90,13 @@ export const normalizedMarketResultSchema = z.object({
   ai_classification: z.enum(["buyer", "supplier", "trader", "importer", "exporter"]).optional(),
   ai_summary: optionalText.optional(),
   relevance_score: z.number().min(0).max(1).optional(),
-  next_action: optionalText.optional()
+  next_action: optionalText.optional(),
+  saved_from_search: z.boolean().optional(),
+  low_confidence: z.boolean().optional(),
+  search_job_id: z.string().trim().max(80).nullable().optional(),
+  source_run_id: z.string().trim().max(80).nullable().optional(),
+  acquisition_origin: z.enum(["directory_page", "company_website", "browser_fallback", "unknown"]).optional(),
+  contact_completeness_score: z.number().min(0).max(1).optional()
 });
 
 export const marketIntelligenceImportSchema = z.object({

@@ -9,6 +9,11 @@ import { understandMarketQuery } from "./query-understanding";
 import { recommendSources } from "./source-selection";
 import { withOriginMeta } from "./source-origin";
 import { SOURCE_BY_ID } from "./source-catalog";
+import {
+  findMatchingLeadBySignals,
+  findMatchingRawLeadBySignals,
+  updateExistingLeadFromResult
+} from "./dedupe";
 import type {
   CreateSearchJobInput,
   CreateSearchJobResponse,
@@ -51,6 +56,8 @@ const clampScore = (value: number) => Math.max(0.01, Math.min(0.99, value));
 
 const computePersistenceRelevance = (result: JobResultItem) => {
   const base = result.relevance_score ?? result.confidence_score ?? 0;
+  const contactCompleteness =
+    typeof result.contact_completeness_score === "number" ? Math.max(0, Math.min(result.contact_completeness_score, 1)) : 0;
   const loweredType = (result.result_type || "").toLowerCase();
   const hasSignal =
     loweredType.includes("importer_signal") ||
@@ -63,12 +70,44 @@ const computePersistenceRelevance = (result: JobResultItem) => {
   if (loweredType.includes("recurring_buyer_signal")) adjusted += 0.13;
   if (!hasSignal && loweredType.includes("buyer_rfq")) adjusted -= 0.14;
   if (!result.company || result.company.trim().length < 2) adjusted -= 0.09;
-  if (!result.contact_name) adjusted -= 0.05;
+  adjusted += contactCompleteness * 0.18;
+  if (!result.contact_name && contactCompleteness < 0.2) adjusted -= 0.05;
 
   return Number(clampScore(adjusted).toFixed(3));
 };
 
 const sourceUrlHash = (sourceUrl: string) => createHash("sha1").update(sourceUrl.toLowerCase()).digest("hex").slice(0, 40);
+
+const parseJsonObject = (value: Prisma.JsonValue | null): Record<string, unknown> => {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+};
+
+const toStringArray = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => (typeof item === "string" ? item.trim() : "")).filter(Boolean);
+};
+
+const mergeNormalizedPayload = (existing: Prisma.JsonValue | null, incoming: Record<string, unknown>, sourceUrl: string) => {
+  const previous = parseJsonObject(existing);
+  const canonicalSourceUrl = typeof previous.source_url === "string" && previous.source_url.trim().length > 0 ? previous.source_url : sourceUrl;
+  const mergedUrls = Array.from(
+    new Set([
+      canonicalSourceUrl,
+      sourceUrl,
+      ...toStringArray(previous.alternative_source_urls),
+      ...toStringArray(incoming.alternative_source_urls)
+    ])
+  ).slice(0, 24);
+
+  return {
+    ...previous,
+    ...incoming,
+    source_url: canonicalSourceUrl,
+    alternative_source_urls: mergedUrls,
+    dedupe_updated_at: new Date().toISOString()
+  };
+};
 
 const toSearchJobSummary = (job: {
   id: string;
@@ -86,7 +125,7 @@ const toSearchJobSummary = (job: {
   savedRawLeads: number;
   lowConfidenceDropped: number;
   errorMessage: string | null;
-}): SearchJobSummary => ({
+}, blockedSources = 0): SearchJobSummary => ({
   id: job.id,
   status: job.status,
   query: job.query,
@@ -95,6 +134,8 @@ const toSearchJobSummary = (job: {
   created_at: job.createdAt.toISOString(),
   started_at: toIso(job.startedAt),
   completed_at: toIso(job.completedAt),
+  source_count: job.totalSources,
+  blocked_sources: blockedSources,
   total_sources: job.totalSources,
   processed_sources: job.processedSources,
   total_results: job.totalResults,
@@ -121,6 +162,24 @@ const ensureParsedQuery = (value: Prisma.JsonValue | null): ParsedQuery | null =
     return null;
   }
 };
+
+const computeResultOrigins = (results: Array<Pick<JobResultItem, "acquisition_origin">>): NonNullable<SourceDiagnostic["result_origins"]> =>
+  results.reduce(
+    (acc, item) => {
+      const origin = item.acquisition_origin || "unknown";
+      if (origin === "directory_page") acc.directory_page += 1;
+      else if (origin === "company_website") acc.company_website += 1;
+      else if (origin === "browser_fallback") acc.browser_fallback += 1;
+      else acc.unknown += 1;
+      return acc;
+    },
+    {
+      directory_page: 0,
+      company_website: 0,
+      browser_fallback: 0,
+      unknown: 0
+    }
+  );
 
 const inferRunStatus = (sourceStatus: SourceStatus, blocked: boolean): SourceRunStatus => {
   if (sourceStatus === "manual") return SourceRunStatus.SKIPPED;
@@ -206,39 +265,160 @@ const persistResult = async (input: {
   }
 
   const hash = sourceUrlHash(normalizedSourceUrl);
-
-  const existingLead = await prisma.lead.findFirst({
-    where: {
-      sourceUrl: {
-        equals: normalizedSourceUrl,
-        mode: "insensitive"
-      }
-    },
-    select: { id: true }
+  const matchedLead = await findMatchingLeadBySignals({
+    source_url: normalizedSourceUrl,
+    source_name: input.result.source_name,
+    company: input.result.company,
+    product: input.result.product,
+    description: input.result.description,
+    raw_text: input.result.raw_text,
+    country: input.result.country,
+    contact_name: input.result.contact_name
   });
 
   const relevance = computePersistenceRelevance(input.result);
+  const lowConfidence = relevance < MEDIUM_CONFIDENCE_THRESHOLD;
+  const normalizedPayload = {
+    ...input.result,
+    source_url: normalizedSourceUrl,
+    relevance_score: relevance,
+    saved_from_search: true,
+    low_confidence: lowConfidence,
+    search_job_id: input.jobId,
+    source_run_id: input.sourceRunId,
+    alternative_source_urls: [normalizedSourceUrl]
+  };
 
-  if (existingLead) {
-    await prisma.rawMarketLead.updateMany({
-      where: { sourceUrlHash: hash },
+  const exactRaw = await prisma.rawMarketLead.findUnique({
+    where: { sourceUrlHash: hash },
+    select: {
+      id: true,
+      sourceUrl: true,
+      sourceUrlHash: true,
+      normalized: true,
+      leadId: true,
+      status: true
+    }
+  });
+
+  const fuzzyRawMatch = exactRaw
+    ? null
+    : await findMatchingRawLeadBySignals({
+        source_url: normalizedSourceUrl,
+        source_name: input.result.source_name,
+        company: input.result.company,
+        product: input.result.product,
+        description: input.result.description,
+        raw_text: input.result.raw_text,
+        country: input.result.country,
+        contact_name: input.result.contact_name
+      });
+
+  const fuzzyRaw =
+    !exactRaw && fuzzyRawMatch
+      ? await prisma.rawMarketLead.findUnique({
+          where: { id: fuzzyRawMatch.rawLeadId },
+          select: {
+            id: true,
+            sourceUrl: true,
+            sourceUrlHash: true,
+            normalized: true,
+            leadId: true,
+            status: true
+          }
+        })
+      : null;
+
+  const candidateRaw = exactRaw || fuzzyRaw;
+  const stagedRawLead = candidateRaw
+    ? await prisma.rawMarketLead.update({
+        where: { id: candidateRaw.id },
+        data: {
+          sourceName: input.result.source_name,
+          searchJobId: input.jobId,
+          sourceRunId: input.sourceRunId,
+          normalized: mergeNormalizedPayload(candidateRaw.normalized, normalizedPayload, normalizedSourceUrl) as unknown as Prisma.InputJsonValue,
+          aiClassification: input.result.ai_classification || null,
+          aiSummary: input.result.ai_summary || null,
+          relevanceScore: relevance || null,
+          confidenceScore: input.result.confidence_score || null,
+          status: candidateRaw.leadId ? "IMPORTED" : "PENDING_REVIEW"
+        },
+        select: { id: true, leadId: true }
+      })
+    : await prisma.rawMarketLead.create({
+        data: {
+          sourceName: input.result.source_name,
+          sourceUrl: normalizedSourceUrl,
+          sourceUrlHash: hash,
+          searchJobId: input.jobId,
+          sourceRunId: input.sourceRunId,
+          normalized: normalizedPayload as unknown as Prisma.InputJsonValue,
+          aiClassification: input.result.ai_classification || null,
+          aiSummary: input.result.ai_summary || null,
+          relevanceScore: relevance || null,
+          confidenceScore: input.result.confidence_score || null,
+          status: "PENDING_REVIEW"
+        },
+        select: { id: true, leadId: true }
+      });
+
+  if (matchedLead) {
+    await updateExistingLeadFromResult(matchedLead.leadId, {
+      source_url: normalizedSourceUrl,
+      source_name: input.result.source_name,
+      description: input.result.description,
+      raw_text: input.result.raw_text,
+      country: input.result.country,
+      destination: input.result.destination,
+      payment_terms: input.result.payment_terms,
+      incoterms: input.result.incoterms,
+      ai_summary: input.result.ai_summary,
+      contact_name: input.result.contact_name
+    });
+
+    await prisma.rawMarketLead.update({
+      where: { id: stagedRawLead.id },
       data: {
         status: "IMPORTED",
-        leadId: existingLead.id
+        leadId: matchedLead.leadId
       }
     });
 
     return {
       persistence_status: "duplicate" as const,
       persistence_message: "Lead already exists",
-      lead_id: existingLead.id
+      lead_id: matchedLead.leadId,
+      raw_lead_id: stagedRawLead.id
+    };
+  }
+
+  if (stagedRawLead.leadId) {
+    await updateExistingLeadFromResult(stagedRawLead.leadId, {
+      source_url: normalizedSourceUrl,
+      source_name: input.result.source_name,
+      description: input.result.description,
+      raw_text: input.result.raw_text,
+      country: input.result.country,
+      destination: input.result.destination,
+      payment_terms: input.result.payment_terms,
+      incoterms: input.result.incoterms,
+      ai_summary: input.result.ai_summary,
+      contact_name: input.result.contact_name
+    });
+
+    return {
+      persistence_status: "duplicate" as const,
+      persistence_message: "Matched existing imported lead",
+      lead_id: stagedRawLead.leadId,
+      raw_lead_id: stagedRawLead.id
     };
   }
 
   if (relevance >= HIGH_CONFIDENCE_THRESHOLD) {
     const imported = await importMarketIntelligenceLead({
       result: {
-        ...input.result,
+        ...normalizedPayload,
         relevance_score: relevance,
         source_url: normalizedSourceUrl
       },
@@ -247,61 +427,34 @@ const persistResult = async (input: {
       with_ai: false
     });
 
-    if (imported.status === "imported") {
-      await prisma.rawMarketLead.updateMany({
-        where: { sourceUrlHash: hash },
-        data: {
-          status: "IMPORTED",
-          leadId: imported.leadId
-        }
-      });
-    }
+    await prisma.rawMarketLead.update({
+      where: { id: stagedRawLead.id },
+      data: {
+        status: "IMPORTED",
+        leadId: imported.leadId
+      }
+    });
 
     return {
       persistence_status: imported.status === "imported" ? ("imported" as const) : ("duplicate" as const),
       persistence_message: imported.message,
-      lead_id: imported.leadId
+      lead_id: imported.leadId,
+      raw_lead_id: stagedRawLead.id
     };
   }
 
   if (relevance >= MEDIUM_CONFIDENCE_THRESHOLD) {
-    const staged = await prisma.rawMarketLead.upsert({
-      where: { sourceUrlHash: hash },
-      create: {
-        sourceName: input.result.source_name,
-        sourceUrl: normalizedSourceUrl,
-        sourceUrlHash: hash,
-        searchJobId: input.jobId,
-        sourceRunId: input.sourceRunId,
-        normalized: input.result as unknown as Prisma.InputJsonValue,
-        aiClassification: input.result.ai_classification || null,
-        aiSummary: input.result.ai_summary || null,
-        relevanceScore: relevance || null,
-        confidenceScore: input.result.confidence_score || null
-      },
-      update: {
-        searchJobId: input.jobId,
-        sourceRunId: input.sourceRunId,
-        normalized: input.result as unknown as Prisma.InputJsonValue,
-        aiClassification: input.result.ai_classification || null,
-        aiSummary: input.result.ai_summary || null,
-        relevanceScore: relevance || null,
-        confidenceScore: input.result.confidence_score || null,
-        status: "PENDING_REVIEW"
-      },
-      select: { id: true }
-    });
-
     return {
       persistence_status: "staged" as const,
       persistence_message: "Saved to raw market leads",
-      raw_lead_id: staged.id
+      raw_lead_id: stagedRawLead.id
     };
   }
 
   return {
     persistence_status: "logged" as const,
-    persistence_message: "Low confidence result skipped"
+    persistence_message: "Saved to raw market leads (low confidence)",
+    raw_lead_id: stagedRawLead.id
   };
 };
 
@@ -362,6 +515,7 @@ const mapRunDiagnostics = (run: {
   blocked: boolean;
   warnings: string[];
   diagnostics: Prisma.JsonValue | null;
+  resultsJson: Prisma.JsonValue | null;
 }, recommendation?: SourceRecommendation): SourceDiagnostic => {
   const fromDb = parseJson<SourceDiagnostic | null>(run.diagnostics, null);
   if (fromDb) {
@@ -371,6 +525,8 @@ const mapRunDiagnostics = (run: {
       selection_reason: fromDb.selection_reason ?? recommendation?.reason
     };
   }
+
+  const runResults = parseJson<JobResultItem[]>(run.resultsJson, []);
 
   const fallbackStatus =
     run.status === SourceRunStatus.BLOCKED
@@ -399,7 +555,8 @@ const mapRunDiagnostics = (run: {
     selection_reason: recommendation?.reason,
     warnings: run.warnings,
     open_source_url: null,
-    save_search_url: null
+    save_search_url: null,
+    result_origins: computeResultOrigins(runResults)
   };
 };
 
@@ -429,7 +586,10 @@ const getJobSnapshotOrThrow = async (jobId: string): Promise<MarketIntelligenceJ
   );
 
   return {
-    job: toSearchJobSummary(job),
+    job: toSearchJobSummary(
+      job,
+      job.sourceRuns.filter((run) => run.blocked || run.status === SourceRunStatus.BLOCKED).length
+    ),
     parsed_query: parsedQuery,
     recommended_sources: recommendedSources,
     source_diagnostics: diagnostics,
@@ -566,7 +726,10 @@ export const processSearchJob = async (jobId: string) => {
 
         if (persisted.persistence_status === "imported") runImported += 1;
         if (persisted.persistence_status === "staged") runRaw += 1;
-        if (persisted.persistence_status === "logged") runLow += 1;
+        if (persisted.persistence_status === "logged") {
+          runRaw += 1;
+          runLow += 1;
+        }
 
         resultPayloads.push({
           ...normalizedResult,
@@ -610,7 +773,8 @@ export const processSearchJob = async (jobId: string) => {
         selection_reason: recommendation?.reason,
         warnings: execution.result.warnings,
         open_source_url: execution.result.fetchedUrls[0] || null,
-        save_search_url: execution.result.fetchedUrls[0] || null
+        save_search_url: execution.result.fetchedUrls[0] || null,
+        result_origins: computeResultOrigins(resultPayloads)
       };
 
       await prisma.searchJobSourceRun.update({
@@ -767,6 +931,57 @@ export const createSearchJob = async (input: CreateSearchJobInput): Promise<Crea
 export const getSearchJobSnapshot = async (jobId: string): Promise<MarketIntelligenceJobSnapshot> => {
   await ensureSearchJobRunning(jobId);
   return getJobSnapshotOrThrow(jobId);
+};
+
+export const listSearchJobs = async (limit = 30): Promise<SearchJobSummary[]> => {
+  const safeLimit = Math.max(5, Math.min(limit, 100));
+  const items = await prisma.searchJob.findMany({
+    orderBy: { createdAt: "desc" },
+    take: safeLimit,
+    include: {
+      sourceRuns: {
+        select: {
+          blocked: true,
+          status: true
+        }
+      }
+    }
+  });
+
+  return items.map((item) =>
+    toSearchJobSummary(
+      item,
+      item.sourceRuns.filter((run) => run.blocked || run.status === SourceRunStatus.BLOCKED).length
+    )
+  );
+};
+
+export const rerunSearchJob = async (jobId: string): Promise<CreateSearchJobResponse> => {
+  const job = await prisma.searchJob.findUnique({
+    where: { id: jobId },
+    select: {
+      id: true,
+      query: true,
+      country: true,
+      intent: true,
+      customSources: true,
+      maxSources: true,
+      maxResultsPerSource: true,
+      savedSearchId: true
+    }
+  });
+
+  if (!job) throw new Error("Search job not found");
+
+  return createSearchJob({
+    query: job.query,
+    country: job.country || undefined,
+    intent: (job.intent as CreateSearchJobInput["intent"]) || undefined,
+    customSources: job.customSources,
+    maxSources: job.maxSources,
+    maxResultsPerSource: job.maxResultsPerSource,
+    savedSearchId: job.savedSearchId
+  });
 };
 
 export const createSavedSearch = async (input: SavedSearchInput): Promise<SavedSearchItem> => {

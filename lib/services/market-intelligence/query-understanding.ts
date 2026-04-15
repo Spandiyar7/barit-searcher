@@ -22,9 +22,14 @@ const PRODUCT_SYNONYMS: Record<string, string[]> = {
   sulfur: ["sulfur", "sulphur"],
   urea: ["urea", "carbamide"],
   polypropylene: ["polypropylene", "pp raffia", "pp granules", "homo pp"],
+  sugar: ["sugar", "white sugar", "icumsa 45", "iccumsa 45", "refined sugar"],
+  "edible oil": ["edible oil", "vegetable oil"],
   chickpeas: ["chickpeas", "chick pea", "kabuli"],
   lentils: ["lentils", "lentil", "masoor"],
   wheat: ["wheat", "durum", "feed wheat", "milling wheat"],
+  flour: ["flour", "wheat flour"],
+  grains: ["grains", "grain"],
+  pulses: ["pulses", "pulse"],
   "sunflower oil": ["sunflower oil", "sfo", "refined sunflower oil"]
 };
 
@@ -54,7 +59,21 @@ const PRODUCT_CATEGORY_KEYWORDS: Record<ProductCategory, string[]> = {
   plastics: ["plastic", "masterbatch", "regrind", "polymer granule", "plastic resin"],
   chemicals: ["chemical", "sulfur", "caustic soda", "soda ash", "solvent", "acetic acid", "methanol"],
   fertilizers: ["urea", "ammonium sulfate", "ammonium nitrate", "dap", "map", "npk", "potash", "fertilizer"],
-  industrial_minerals: ["barite", "bentonite", "gypsum", "silica", "feldspar", "dolomite", "lime", "kaolin"]
+  industrial_minerals: ["barite", "bentonite", "gypsum", "silica", "feldspar", "dolomite", "lime", "kaolin"],
+  food_agriculture: [
+    "sugar",
+    "white sugar",
+    "icumsa 45",
+    "iccumsa 45",
+    "edible oil",
+    "sunflower oil",
+    "chickpeas",
+    "lentils",
+    "wheat",
+    "flour",
+    "grains",
+    "pulses"
+  ]
 };
 
 const COUNTRY_ALIASES: Array<{ canonical: string; aliases: string[] }> = [
@@ -122,11 +141,27 @@ const inferProductCategory = (query: string, product: string | null): ProductCat
   if (product) {
     const normalizedProduct = product.toLowerCase();
     if (["polypropylene"].includes(normalizedProduct)) bump("polymers", 3);
-    if (["sunflower oil"].includes(normalizedProduct)) bump("fuels", 1);
     if (["urea"].includes(normalizedProduct)) bump("fertilizers", 3);
     if (["sulfur"].includes(normalizedProduct)) bump("chemicals", 3);
     if (["barite"].includes(normalizedProduct)) bump("industrial_minerals", 3);
-    if (["chickpeas", "lentils", "wheat"].includes(normalizedProduct)) bump("fertilizers", -1);
+    if (
+      [
+        "sugar",
+        "white sugar",
+        "icumsa 45",
+        "iccumsa 45",
+        "edible oil",
+        "sunflower oil",
+        "chickpeas",
+        "lentils",
+        "wheat",
+        "flour",
+        "grains",
+        "pulses"
+      ].includes(normalizedProduct)
+    ) {
+      bump("food_agriculture", 4);
+    }
   }
 
   let best: ProductCategory | null = null;
@@ -149,7 +184,7 @@ const inferIntent = (query: string): SearchIntent => {
   if (/(manufacturer|factory|mill|producer)/.test(lowered)) return "manufacturers";
   if (/(importer|import)/.test(lowered)) return "importers";
   if (/(exporter|export)/.test(lowered)) return "exporters";
-  if (/(supplier|supply|seller|offer available|producers)/.test(lowered)) return "suppliers";
+  if (/(supplier|supply|seller|offer available|producers|distributor|distributors)/.test(lowered)) return "suppliers";
   if (/(deal|transaction|cargo|shipment)/.test(lowered)) return "deals";
   if (/(buyer|buy|procurement|tender)/.test(lowered) && hasCountry) return "importers";
   if (/(buyer|buy|procurement|tender)/.test(lowered)) return "buyers";
@@ -166,7 +201,9 @@ const inferSignalIntents = (
 ) => {
   const lowered = query.toLowerCase();
   const hasBuyerLanguage = /(buyer|buyers|buy|procurement|tender|purchase)/.test(lowered);
-  const hasSupplierLanguage = /(supplier|suppliers|seller|offer|quote|manufacturer|factory)/.test(lowered);
+  const hasSupplierLanguage = /(supplier|suppliers|seller|offer|quote|manufacturer|factory|distributor|distributors)/.test(
+    lowered
+  );
   const hasImporterLanguage = /(importer|import|importing|destination|arrival)/.test(lowered);
   const hasExporterLanguage = /(exporter|export|origin|fob|exw|shipment from)/.test(lowered);
   const hasRecurringLanguage =
@@ -327,7 +364,7 @@ const getAIUnderstanding = async (
         {
           role: "system",
           content:
-            "You are a commodity trading market intelligence router. Return strict JSON with keys: product(string|null), product_category(one of petrochemicals,fuels,lng_lpg,polymers,plastics,chemicals,fertilizers,industrial_minerals|null), intent(one of buyers,suppliers,manufacturers,importers,exporters,rfq,deals), importer_intent(boolean), exporter_intent(boolean), recurring_buyer_intent(boolean), target_country_or_region(string|null), buyer_country(string|null), supplier_country(string|null), origin_country(string|null), destination_country(string|null), desired_result_type(one of buyer_leads,supplier_profiles,company_directory,trade_analytics,mixed), search_priority(one of high,medium,low), intent_confidence(number 0..1)."
+            "You are a commodity trading market intelligence router. Return strict JSON with keys: product(string|null), product_category(one of petrochemicals,fuels,lng_lpg,polymers,plastics,chemicals,fertilizers,industrial_minerals,food_agriculture|null), intent(one of buyers,suppliers,manufacturers,importers,exporters,rfq,deals), importer_intent(boolean), exporter_intent(boolean), recurring_buyer_intent(boolean), target_country_or_region(string|null), buyer_country(string|null), supplier_country(string|null), origin_country(string|null), destination_country(string|null), desired_result_type(one of buyer_leads,supplier_profiles,company_directory,trade_analytics,mixed), search_priority(one of high,medium,low), intent_confidence(number 0..1)."
         },
         {
           role: "user",
@@ -378,7 +415,8 @@ const normalizeProductCategory = (value: string | null | undefined): ProductCate
     "plastics",
     "chemicals",
     "fertilizers",
-    "industrial_minerals"
+    "industrial_minerals",
+    "food_agriculture"
   ];
   return allowed.find((item) => item === normalized) ?? null;
 };

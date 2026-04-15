@@ -15,7 +15,9 @@ import type { Locale } from "@/lib/i18n/config";
 
 type LeadDatabaseItem = {
   id: string;
-  leadId: string;
+  leadId: string | null;
+  rawRecordId: string | null;
+  promotedToLeadId: string | null;
   company: string;
   role: "buyer" | "supplier" | "importer" | "exporter" | "manufacturer" | "trader";
   country: string | null;
@@ -30,16 +32,38 @@ type LeadDatabaseItem = {
   website: string | null;
   sourceName: string;
   sourceUrl: string;
+  sourceKind: "live" | "mock" | "test" | "fallback";
+  importMode: "fetch" | "browser" | "manual" | "generated";
+  origin: string;
   confidenceScore: number;
+  confidenceTier: "high" | "medium" | "low";
   rankingScore: number;
   tier: "ready" | "actionable" | "signal";
+  reviewStatus: "READY" | "PENDING_REVIEW" | "IMPORTED" | "REJECTED";
   whyMatched: string[];
   hasContact: boolean;
   hasEmail: boolean;
   hasPhone: boolean;
   hasVolume: boolean;
   searchJobId: string | null;
+  savedFromSearch: boolean;
+  sourceRecordType: "lead" | "raw";
+  lowConfidence: boolean;
   createdAt: string;
+};
+
+type SearchHistoryItem = {
+  id: string;
+  status: string;
+  query: string;
+  country: string | null;
+  intent: string | null;
+  created_at: string;
+  source_count: number;
+  blocked_sources: number;
+  total_results: number;
+  imported_leads: number;
+  saved_raw_leads: number;
 };
 
 type LeadDatabaseSnapshot = {
@@ -87,6 +111,18 @@ const confidenceVariant = (score: number) => {
   return "default" as const;
 };
 
+const confidenceTierVariant = (tier: LeadDatabaseItem["confidenceTier"]) => {
+  if (tier === "high") return "success" as const;
+  if (tier === "medium") return "warning" as const;
+  return "default" as const;
+};
+
+const reviewStatusVariant = (status: LeadDatabaseItem["reviewStatus"]) => {
+  if (status === "IMPORTED" || status === "READY") return "success" as const;
+  if (status === "PENDING_REVIEW") return "warning" as const;
+  return "default" as const;
+};
+
 const whyKeyMap: Record<string, string> = {
   roleRelevance: "leadDatabase.why.roleRelevance",
   contactCompleteness: "leadDatabase.why.contactCompleteness",
@@ -112,6 +148,8 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
 
   const [database, setDatabase] = useState<LeadDatabaseListResponse | null>(null);
   const [snapshot, setSnapshot] = useState<LeadDatabaseSnapshot | null>(null);
+  const [history, setHistory] = useState<SearchHistoryItem[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   const [productFilter, setProductFilter] = useState("");
   const [roleFilter, setRoleFilter] = useState("");
@@ -144,6 +182,29 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
     };
 
     void loadDatabase();
+    return () => {
+      cancelled = true;
+    };
+  }, [t]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadHistory = async () => {
+      try {
+        setHistoryLoading(true);
+        const response = await fetch("/api/lead-database/jobs?limit=30");
+        const json = (await response.json().catch(() => ({}))) as ApiPayload<SearchHistoryItem[]>;
+        if (!response.ok || !json.data) throw new Error(t("leadDatabase.historyLoadError"));
+        if (!cancelled) setHistory(json.data);
+      } catch {
+        if (!cancelled) setHistory([]);
+      } finally {
+        if (!cancelled) setHistoryLoading(false);
+      }
+    };
+
+    void loadHistory();
     return () => {
       cancelled = true;
     };
@@ -208,6 +269,11 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
       if (!response.ok || !json.data?.job_id) throw new Error(json.error || t("leadDatabase.createError"));
       setJobId(json.data.job_id);
       setSnapshot(null);
+      const historyResponse = await fetch("/api/lead-database/jobs?limit=30");
+      const historyJson = (await historyResponse.json().catch(() => ({}))) as ApiPayload<SearchHistoryItem[]>;
+      if (historyResponse.ok && historyJson.data) {
+        setHistory(historyJson.data);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : t("leadDatabase.createError"));
     } finally {
@@ -235,6 +301,34 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
       }));
     } finally {
       setContactLoadingId(null);
+    }
+  };
+
+  const openHistoryJob = (id: string) => {
+    setJobId(id);
+    setSnapshot(null);
+    setError(null);
+  };
+
+  const rerunHistoryJob = async (id: string) => {
+    try {
+      setError(null);
+      const response = await fetch(`/api/lead-database/jobs/${id}/rerun`, {
+        method: "POST"
+      });
+      const json = (await response.json().catch(() => ({}))) as ApiPayload<{ job_id: string }>;
+      if (!response.ok || !json.data?.job_id) throw new Error(json.error || t("leadDatabase.rerunError"));
+
+      setJobId(json.data.job_id);
+      setSnapshot(null);
+
+      const historyResponse = await fetch("/api/lead-database/jobs?limit=30");
+      const historyJson = (await historyResponse.json().catch(() => ({}))) as ApiPayload<SearchHistoryItem[]>;
+      if (historyResponse.ok && historyJson.data) {
+        setHistory(historyJson.data);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t("leadDatabase.rerunError"));
     }
   };
 
@@ -329,6 +423,42 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
           <p className="mt-3 text-xs text-slate-500">
             {t("leadDatabase.jobStatus")}: {snapshot.job.status} {polling ? ` • ${t("leadDatabase.updating")}` : ""}
           </p>
+        ) : null}
+      </Card>
+
+      <Card className="space-y-3">
+        <CardTitle>{t("leadDatabase.searchHistory")}</CardTitle>
+        {historyLoading ? <p className="text-sm text-slate-500">{t("leadDatabase.historyLoading")}</p> : null}
+        {!historyLoading && history.length === 0 ? (
+          <p className="text-sm text-slate-500">{t("leadDatabase.noHistory")}</p>
+        ) : null}
+        {!historyLoading && history.length > 0 ? (
+          <div className="space-y-2">
+            {history.slice(0, 12).map((item) => (
+              <div
+                key={item.id}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-border px-3 py-2"
+              >
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-slate-900">{item.query}</p>
+                  <p className="text-xs text-slate-500">
+                    {new Date(item.created_at).toLocaleString(locale === "ru" ? "ru-RU" : "en-US")} • {item.total_results}{" "}
+                    {t("leadDatabase.historyResults")} • {item.imported_leads} {t("leadDatabase.historyImported")} •{" "}
+                    {item.saved_raw_leads} {t("leadDatabase.historyRaw")} • {item.source_count}{" "}
+                    {t("leadDatabase.historySources")} • {item.blocked_sources} {t("leadDatabase.historyBlocked")}
+                  </p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button type="button" variant="secondary" className="h-8 px-3 text-xs" onClick={() => openHistoryJob(item.id)}>
+                    {t("leadDatabase.openHistoryJob")}
+                  </Button>
+                  <Button type="button" variant="ghost" className="h-8 px-3 text-xs" onClick={() => void rerunHistoryJob(item.id)}>
+                    {t("leadDatabase.rerunHistoryJob")}
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
         ) : null}
       </Card>
 
@@ -428,7 +558,13 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
             <THead>
               <TR>
                 <TH>{t("leadDatabase.company")}</TH>
+                <TH>{t("leadDatabase.savedFromSearch")}</TH>
+                <TH>{t("leadDatabase.origin")}</TH>
                 <TH>{t("leadDatabase.tier")}</TH>
+                <TH>{t("leadDatabase.confidenceTier")}</TH>
+                <TH>{t("leadDatabase.reviewStatus")}</TH>
+                <TH>{t("leadDatabase.rawRecordId")}</TH>
+                <TH>{t("leadDatabase.promotedLeadId")}</TH>
                 <TH>{t("leadDatabase.role")}</TH>
                 <TH>{t("leadDatabase.country")}</TH>
                 <TH>{t("leadDatabase.product")}</TH>
@@ -449,15 +585,58 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
                   <TD>
                     <div className="space-y-1">
                       <p className="font-semibold text-slate-900">{item.company}</p>
-                      <Link href={`/leads/${item.leadId}`} className="text-xs text-primary hover:underline">
-                        {t("leadDatabase.openLead")}
-                      </Link>
+                      {item.leadId ? (
+                        <Link href={`/leads/${item.leadId}`} className="text-xs text-primary hover:underline">
+                          {t("leadDatabase.openLead")}
+                        </Link>
+                      ) : (
+                        <span className="text-xs text-slate-500">{t("leadDatabase.pendingReview")}</span>
+                      )}
+                    </div>
+                  </TD>
+                  <TD>
+                    <Badge variant={item.savedFromSearch ? "success" : "default"}>
+                      {item.savedFromSearch ? t("leadDatabase.savedFromSearchYes") : t("leadDatabase.savedFromSearchNo")}
+                    </Badge>
+                  </TD>
+                  <TD>
+                    <div className="space-y-1">
+                      <Badge variant="default">{t(`sourceKind.${item.sourceKind}`)}</Badge>
+                      <Badge variant="default">{t(`importMode.${item.importMode}`)}</Badge>
                     </div>
                   </TD>
                   <TD>
                     <Badge variant={item.tier === "ready" ? "success" : item.tier === "actionable" ? "warning" : "default"}>
                       {t(`leadDatabase.tier.${item.tier}`)}
                     </Badge>
+                  </TD>
+                  <TD>
+                    <Badge variant={confidenceTierVariant(item.confidenceTier)}>
+                      {t(`leadDatabase.confidenceTier.${item.confidenceTier}`)}
+                    </Badge>
+                  </TD>
+                  <TD>
+                    <Badge variant={reviewStatusVariant(item.reviewStatus)}>
+                      {t(`leadDatabase.reviewStatus.${item.reviewStatus}`)}
+                    </Badge>
+                  </TD>
+                  <TD>
+                    {item.rawRecordId ? (
+                      <code className="block max-w-[160px] truncate text-xs text-slate-600" title={item.rawRecordId}>
+                        {item.rawRecordId}
+                      </code>
+                    ) : (
+                      <span className="text-xs text-slate-500">{t("common.noData")}</span>
+                    )}
+                  </TD>
+                  <TD>
+                    {item.promotedToLeadId ? (
+                      <code className="block max-w-[160px] truncate text-xs text-slate-600" title={item.promotedToLeadId}>
+                        {item.promotedToLeadId}
+                      </code>
+                    ) : (
+                      <span className="text-xs text-slate-500">{t("common.noData")}</span>
+                    )}
                   </TD>
                   <TD>
                     <Badge variant={roleVariant(item.role)}>{t(`leadDatabase.role.${item.role}`)}</Badge>
@@ -521,12 +700,16 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
                         type="button"
                         variant="secondary"
                         className="h-8 px-3 text-xs"
-                        disabled={contactLoadingId === item.leadId}
-                        onClick={() => void findContact(item.leadId)}
+                        disabled={!item.leadId || contactLoadingId === item.leadId}
+                        onClick={() => (item.leadId ? void findContact(item.leadId) : undefined)}
                       >
-                        {contactLoadingId === item.leadId ? t("leadDatabase.findingContact") : t("leadDatabase.findContact")}
+                        {!item.leadId
+                          ? t("leadDatabase.notAvailable")
+                          : contactLoadingId === item.leadId
+                            ? t("leadDatabase.findingContact")
+                            : t("leadDatabase.findContact")}
                       </Button>
-                      {contactActionState[item.leadId] ? (
+                      {item.leadId && contactActionState[item.leadId] ? (
                         <p className="max-w-[180px] text-[11px] text-slate-500">{contactActionState[item.leadId]}</p>
                       ) : null}
                     </div>

@@ -132,6 +132,8 @@ export default async function RawMarketLeadsPage({
               <THead>
                 <TR>
                   <TH className="w-[160px]">{t("common.company")}</TH>
+                  <TH className="w-[190px]">{t("rawMarketLeads.rawRecordId")}</TH>
+                  <TH className="w-[190px]">{t("rawMarketLeads.promotedLeadId")}</TH>
                   <TH className="w-[120px]">{t("common.product")}</TH>
                   <TH className="w-[110px]">{t("common.country")}</TH>
                   <TH className="w-[120px]">{t("rawMarketLeads.sourceName")}</TH>
@@ -159,6 +161,16 @@ export default async function RawMarketLeadsPage({
                   return (
                     <TR key={row.id}>
                       <TD className="align-top">{row.company || "-"}</TD>
+                      <TD className="align-top">
+                        <code className="block max-w-[180px] truncate text-xs text-slate-600" title={row.rawRecordId}>
+                          {row.rawRecordId}
+                        </code>
+                      </TD>
+                      <TD className="align-top">
+                        <code className="block max-w-[180px] truncate text-xs text-slate-600" title={row.promotedToLeadId || ""}>
+                          {row.promotedToLeadId || t("rawMarketLeads.notPromoted")}
+                        </code>
+                      </TD>
                       <TD className="align-top">{row.product || "-"}</TD>
                       <TD className="align-top">{row.country || "-"}</TD>
                       <TD className="align-top">

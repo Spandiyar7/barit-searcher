@@ -11,36 +11,34 @@ const buildSearchUrls = (input: SourceEngineInput) => {
     input.parsedQuery.supplier_country ||
     input.parsedQuery.buyer_country ||
     "";
-
   const countrySlug = country ? slugify(country) : "";
 
   const urls = [
-    `https://www.kompass.com/en/searchCompanies/?q=${encoded}`,
-    `https://www.kompass.com/en/searchProducts/?q=${encoded}`,
-    `https://www.kompass.com/en/s/${slug}/`,
-    `https://www.kompass.com/en/s/${slug}/companies/`,
-    `https://www.kompass.com/en/s/${slug}/suppliers/`,
-    `https://www.kompass.com/en/searchCompanies/?text=${encoded}`,
-    `https://www.kompass.com/en/searchCompanies/?q=${encoded}&type=companies`
+    `https://www.europages.com/search?q=${encoded}`,
+    `https://www.europages.com/en/search?keywords=${encoded}`,
+    `https://www.europages.com/companies/${slug}.html`,
+    `https://www.europages.com/companies/${slug}/`,
+    `https://www.europages.com/companies/${slug}.html?query=${encoded}`
   ];
 
   if (country) {
-    urls.push(`https://www.kompass.com/en/searchCompanies/?q=${encoded}&country=${encodeURIComponent(country)}`);
-    urls.push(`https://www.kompass.com/en/searchCompanies/?q=${encoded}&region=${encodeURIComponent(country)}`);
+    urls.push(`https://www.europages.com/search?q=${encoded}&country=${encodeURIComponent(country)}`);
+    urls.push(`https://www.europages.com/en/search?keywords=${encoded}&country=${encodeURIComponent(country)}`);
     if (countrySlug) {
-      urls.push(`https://www.kompass.com/en/${countrySlug}/companies/`);
-      urls.push(`https://www.kompass.com/en/${countrySlug}/companies/${slug}/`);
+      urls.push(`https://www.europages.com/companies/${countrySlug}/`);
+      urls.push(`https://www.europages.com/companies/${countrySlug}/${slug}.html`);
+      urls.push(`https://www.europages.com/companies/${countrySlug}/${slug}/`);
     }
   }
 
   return Array.from(new Set(urls));
 };
 
-export const runKompassEngine = async (input: SourceEngineInput): Promise<SourceEngineResult> => {
+export const runEuropagesEngine = async (input: SourceEngineInput): Promise<SourceEngineResult> => {
   const executionMode = input.executionMode || input.source.executionMode;
   return runDirectoryDiscoveryEngine({
-    sourceId: "kompass",
-    sourceName: "Kompass",
+    sourceId: "europages",
+    sourceName: "Europages",
     parsedQuery: input.parsedQuery,
     searchUrls: buildSearchUrls(input),
     maxResults: input.maxResults,
@@ -55,8 +53,9 @@ export const runKompassEngine = async (input: SourceEngineInput): Promise<Source
       "/import",
       "/export",
       "/distributor",
-      "/c/"
+      "-company-",
+      "-supplier-"
     ],
-    excludePathHints: ["help", "support", "news", "event", "privacy", "cookie", "terms", "login", "register"]
+    excludePathHints: ["privacy", "cookie", "terms", "help", "support", "news", "login", "register"]
   });
 };

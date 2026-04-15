@@ -169,6 +169,16 @@ npm run prisma:deploy
 npm run prisma:seed
 ```
 
+## Server-Side Validation
+- CI workflow: `.github/workflows/server-validation.yml`
+- Runs on push/PR with Node 20:
+1. `npm ci`
+2. `npx prisma generate`
+3. `npm run lint`
+4. `npm run build`
+
+Use this workflow (or Northflank build pipeline) when local Node/NPM is unavailable.
+
 ## Notes
 - This MVP intentionally supports manual CRM inputs and AI analysis of user-provided text.
 - No scraping, CAPTCHA bypass, stealth automation, or unrestricted crawling is implemented.

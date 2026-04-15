@@ -26,7 +26,8 @@ export type ProductCategory =
   | "plastics"
   | "chemicals"
   | "fertilizers"
-  | "industrial_minerals";
+  | "industrial_minerals"
+  | "food_agriculture";
 
 export type SourceGroup = "rfq_platforms" | "supplier_platforms" | "directories" | "analytics" | "direct_websites";
 
@@ -179,6 +180,12 @@ export type NormalizedMarketResult = {
   ai_summary?: string | null;
   relevance_score?: number;
   next_action?: string | null;
+  saved_from_search?: boolean;
+  low_confidence?: boolean;
+  search_job_id?: string | null;
+  source_run_id?: string | null;
+  acquisition_origin?: "directory_page" | "company_website" | "browser_fallback" | "unknown";
+  contact_completeness_score?: number;
 };
 
 export type SourceEngineInput = {
@@ -225,6 +232,12 @@ export type SourceDiagnostic = {
   warnings: string[];
   open_source_url: string | null;
   save_search_url: string | null;
+  result_origins?: {
+    directory_page: number;
+    company_website: number;
+    browser_fallback: number;
+    unknown: number;
+  };
 };
 
 export type SourceExecutionTrace = {
@@ -312,6 +325,8 @@ export type SearchJobSummary = {
   created_at: string;
   started_at: string | null;
   completed_at: string | null;
+  source_count: number;
+  blocked_sources: number;
   total_sources: number;
   processed_sources: number;
   total_results: number;

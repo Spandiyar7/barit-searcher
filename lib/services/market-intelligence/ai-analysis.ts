@@ -91,6 +91,7 @@ const computeRelevance = (
   const intentBonus = intentMatch ? 0.15 : -0.08;
 
   const confidence = typeof result.confidence_score === "number" ? result.confidence_score * 0.25 : 0;
+  const contactCompleteness = typeof result.contact_completeness_score === "number" ? result.contact_completeness_score * 0.18 : 0;
   const hasContact = Boolean(result.contact_name);
   const hasCompany = Boolean(result.company && result.company.trim().length > 1);
   const multiSourceSignal = companyStats.sourceCount >= 2;
@@ -106,7 +107,7 @@ const computeRelevance = (
   if (!hasContact) signalBonus -= 0.05;
   if (result.result_type === "buyer_rfq" && !signalType) signalBonus -= 0.14;
 
-  const score = 0.32 + tokenScore * 0.28 + countryMatch + intentBonus + confidence + signalBonus;
+  const score = 0.32 + tokenScore * 0.28 + countryMatch + intentBonus + confidence + contactCompleteness + signalBonus;
   return Number(Math.max(0.05, Math.min(0.99, score)).toFixed(2));
 };
 

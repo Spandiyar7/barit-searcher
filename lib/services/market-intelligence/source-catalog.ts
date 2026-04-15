@@ -74,8 +74,16 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     group: "rfq_platforms",
     intents: ALL_TRADE_INTENTS,
     priorityTier: 1,
-    industrySpecialization: ["commodities", "industrial_trade", "chemicals"],
-    productCategoryFit: ["petrochemicals", "chemicals", "polymers", "plastics", "fertilizers", "industrial_minerals"],
+    industrySpecialization: ["commodities", "industrial_trade", "chemicals", "agri_trade"],
+    productCategoryFit: [
+      "petrochemicals",
+      "chemicals",
+      "polymers",
+      "plastics",
+      "fertilizers",
+      "industrial_minerals",
+      "food_agriculture"
+    ],
     antiBotRisk: "medium",
     reliabilityScore: 61,
     defaultRankingWeight: 90
@@ -105,7 +113,7 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     browserCapable: true,
     priorityTier: 1,
     industrySpecialization: ["commodities", "chemicals", "fuels", "agri_trade"],
-    productCategoryFit: ["petrochemicals", "fuels", "lng_lpg", "chemicals", "fertilizers", "polymers"],
+    productCategoryFit: ["petrochemicals", "fuels", "lng_lpg", "chemicals", "fertilizers", "polymers", "food_agriculture"],
     antiBotRisk: "medium",
     reliabilityScore: 58,
     defaultRankingWeight: 87
@@ -146,8 +154,16 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     group: "rfq_platforms",
     intents: ALL_TRADE_INTENTS,
     priorityTier: 1,
-    industrySpecialization: ["industrial_trade", "chemicals", "plastics"],
-    productCategoryFit: ["petrochemicals", "polymers", "plastics", "chemicals", "fertilizers", "industrial_minerals"],
+    industrySpecialization: ["industrial_trade", "chemicals", "plastics", "agri_trade"],
+    productCategoryFit: [
+      "petrochemicals",
+      "polymers",
+      "plastics",
+      "chemicals",
+      "fertilizers",
+      "industrial_minerals",
+      "food_agriculture"
+    ],
     antiBotRisk: "medium",
     reliabilityScore: 55,
     defaultRankingWeight: 83
@@ -158,8 +174,8 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     group: "rfq_platforms",
     intents: ALL_TRADE_INTENTS,
     priorityTier: 1,
-    industrySpecialization: ["global_trade", "chemicals", "manufacturing"],
-    productCategoryFit: ["petrochemicals", "polymers", "plastics", "chemicals", "fertilizers", "fuels"],
+    industrySpecialization: ["global_trade", "chemicals", "manufacturing", "agri_trade"],
+    productCategoryFit: ["petrochemicals", "polymers", "plastics", "chemicals", "fertilizers", "fuels", "food_agriculture"],
     antiBotRisk: "high",
     reliabilityScore: 49,
     defaultRankingWeight: 80
@@ -200,7 +216,15 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     priorityTier: 2,
     purpose: "signal",
     industrySpecialization: ["import_export_data", "shipment_intelligence"],
-    productCategoryFit: ["petrochemicals", "fuels", "polymers", "chemicals", "fertilizers", "industrial_minerals"],
+    productCategoryFit: [
+      "petrochemicals",
+      "fuels",
+      "polymers",
+      "chemicals",
+      "fertilizers",
+      "industrial_minerals",
+      "food_agriculture"
+    ],
     antiBotRisk: "low",
     reliabilityScore: 64,
     defaultRankingWeight: 72
@@ -213,7 +237,15 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     priorityTier: 2,
     purpose: "signal",
     industrySpecialization: ["supply_chain", "import_export_data"],
-    productCategoryFit: ["petrochemicals", "fuels", "polymers", "chemicals", "fertilizers", "industrial_minerals"],
+    productCategoryFit: [
+      "petrochemicals",
+      "fuels",
+      "polymers",
+      "chemicals",
+      "fertilizers",
+      "industrial_minerals",
+      "food_agriculture"
+    ],
     antiBotRisk: "low",
     reliabilityScore: 60,
     defaultRankingWeight: 68
@@ -226,7 +258,15 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     priorityTier: 2,
     purpose: "signal",
     industrySpecialization: ["shipment_data", "import_export_data"],
-    productCategoryFit: ["petrochemicals", "fuels", "polymers", "chemicals", "fertilizers", "industrial_minerals"],
+    productCategoryFit: [
+      "petrochemicals",
+      "fuels",
+      "polymers",
+      "chemicals",
+      "fertilizers",
+      "industrial_minerals",
+      "food_agriculture"
+    ],
     antiBotRisk: "low",
     reliabilityScore: 58,
     defaultRankingWeight: 66
@@ -239,7 +279,15 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     priorityTier: 2,
     purpose: "signal",
     industrySpecialization: ["trade_data", "shipment_intelligence"],
-    productCategoryFit: ["petrochemicals", "fuels", "polymers", "chemicals", "fertilizers", "industrial_minerals"],
+    productCategoryFit: [
+      "petrochemicals",
+      "fuels",
+      "polymers",
+      "chemicals",
+      "fertilizers",
+      "industrial_minerals",
+      "food_agriculture"
+    ],
     antiBotRisk: "low",
     reliabilityScore: 56,
     defaultRankingWeight: 64
@@ -252,7 +300,15 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     priorityTier: 2,
     purpose: "signal",
     industrySpecialization: ["trade_data", "risk_and_compliance"],
-    productCategoryFit: ["petrochemicals", "fuels", "polymers", "chemicals", "fertilizers", "industrial_minerals"],
+    productCategoryFit: [
+      "petrochemicals",
+      "fuels",
+      "polymers",
+      "chemicals",
+      "fertilizers",
+      "industrial_minerals",
+      "food_agriculture"
+    ],
     antiBotRisk: "low",
     reliabilityScore: 54,
     defaultRankingWeight: 62
@@ -291,26 +347,38 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     intents: ["suppliers", "manufacturers", "buyers", "importers", "exporters", "deals"],
     engineAvailable: true,
     executionMode: "fetch",
+    browserCapable: true,
     priorityTier: 2,
     purpose: "directory",
-    industrySpecialization: ["company_directory", "industrial_suppliers"],
-    productCategoryFit: ["petrochemicals", "chemicals", "polymers", "plastics", "fertilizers", "industrial_minerals"],
+    industrySpecialization: ["company_directory", "industrial_suppliers", "food_agri_directory"],
+    productCategoryFit: [
+      "petrochemicals",
+      "chemicals",
+      "polymers",
+      "plastics",
+      "fertilizers",
+      "industrial_minerals",
+      "food_agriculture"
+    ],
     antiBotRisk: "medium",
     reliabilityScore: 70,
-    defaultRankingWeight: 70
+    defaultRankingWeight: 80
   }),
   buildSource({
     id: "europages",
     name: "Europages",
     group: "directories",
-    intents: ["suppliers", "manufacturers", "exporters", "deals"],
+    intents: ["suppliers", "manufacturers", "buyers", "importers", "exporters", "deals"],
+    engineAvailable: true,
+    executionMode: "fetch",
+    browserCapable: true,
     priorityTier: 2,
     purpose: "directory",
-    industrySpecialization: ["eu_supplier_directory"],
-    productCategoryFit: ["petrochemicals", "polymers", "plastics", "chemicals", "industrial_minerals"],
+    industrySpecialization: ["eu_supplier_directory", "food_agri_directory"],
+    productCategoryFit: ["petrochemicals", "polymers", "plastics", "chemicals", "industrial_minerals", "food_agriculture"],
     antiBotRisk: "low",
     reliabilityScore: 52,
-    defaultRankingWeight: 60
+    defaultRankingWeight: 74
   }),
   buildSource({
     id: "thomasnet",
@@ -459,7 +527,8 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     priorityTier: 3,
     antiBotRisk: "medium",
     reliabilityScore: 34,
-    defaultRankingWeight: 18
+    productCategoryFit: ["food_agriculture", "fertilizers", "industrial_minerals"],
+    defaultRankingWeight: 24
   }),
   buildSource({
     id: "avito",
@@ -479,7 +548,8 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     priorityTier: 3,
     antiBotRisk: "medium",
     reliabilityScore: 32,
-    defaultRankingWeight: 16
+    productCategoryFit: ["food_agriculture", "fertilizers", "industrial_minerals", "chemicals"],
+    defaultRankingWeight: 22
   }),
   buildSource({
     id: "tiuru",
@@ -499,7 +569,8 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     priorityTier: 3,
     antiBotRisk: "medium",
     reliabilityScore: 28,
-    defaultRankingWeight: 14
+    productCategoryFit: ["food_agriculture"],
+    defaultRankingWeight: 19
   }),
   buildSource({
     id: "agroserver",
@@ -509,7 +580,9 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     priorityTier: 3,
     antiBotRisk: "medium",
     reliabilityScore: 34,
-    defaultRankingWeight: 17
+    industrySpecialization: ["agri_trade", "food_wholesale"],
+    productCategoryFit: ["food_agriculture", "fertilizers"],
+    defaultRankingWeight: 34
   }),
   buildSource({
     id: "flagma",
@@ -520,7 +593,9 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     purpose: "directory",
     antiBotRisk: "medium",
     reliabilityScore: 33,
-    defaultRankingWeight: 20
+    industrySpecialization: ["regional_directory", "agri_trade"],
+    productCategoryFit: ["food_agriculture", "fertilizers", "industrial_minerals", "chemicals"],
+    defaultRankingWeight: 32
   }),
   buildSource({
     id: "agro_kg",
@@ -530,7 +605,9 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     priorityTier: 3,
     antiBotRisk: "low",
     reliabilityScore: 26,
-    defaultRankingWeight: 13
+    industrySpecialization: ["agri_trade", "regional_marketplace"],
+    productCategoryFit: ["food_agriculture", "fertilizers"],
+    defaultRankingWeight: 28
   }),
   buildSource({
     id: "tajagro",
@@ -540,7 +617,9 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     priorityTier: 3,
     antiBotRisk: "low",
     reliabilityScore: 25,
-    defaultRankingWeight: 12
+    industrySpecialization: ["agri_trade", "regional_marketplace"],
+    productCategoryFit: ["food_agriculture", "fertilizers"],
+    defaultRankingWeight: 26
   }),
   buildSource({
     id: "gieldarolna",
@@ -550,7 +629,9 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     priorityTier: 3,
     antiBotRisk: "low",
     reliabilityScore: 28,
-    defaultRankingWeight: 13
+    industrySpecialization: ["agri_trade", "grain_market"],
+    productCategoryFit: ["food_agriculture"],
+    defaultRankingWeight: 26
   }),
   buildSource({
     id: "gratka",
@@ -561,14 +642,18 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
     purpose: "directory",
     antiBotRisk: "low",
     reliabilityScore: 24,
-    defaultRankingWeight: 10
+    productCategoryFit: ["food_agriculture", "industrial_minerals"],
+    defaultRankingWeight: 14
   }),
   buildSource({
     id: "direct_websites",
     name: "Direct Company Websites",
     group: "direct_websites",
     intents: ALL_TRADE_INTENTS,
-    priorityTier: 2,
+    engineAvailable: true,
+    executionMode: "fetch",
+    browserCapable: true,
+    priorityTier: 1,
     purpose: "directory",
     industrySpecialization: ["direct_company_domains"],
     productCategoryFit: [
@@ -579,11 +664,12 @@ export const SOURCE_CATALOG: SourceDescriptor[] = [
       "plastics",
       "chemicals",
       "fertilizers",
-      "industrial_minerals"
+      "industrial_minerals",
+      "food_agriculture"
     ],
     antiBotRisk: "low",
-    reliabilityScore: 58,
-    defaultRankingWeight: 64
+    reliabilityScore: 66,
+    defaultRankingWeight: 92
   })
 ];
 

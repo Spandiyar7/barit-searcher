@@ -8,6 +8,8 @@ import { normalizedMarketResultSchema } from "@/lib/validations/market-intellige
 
 export type RawMarketLeadListItem = {
   id: string;
+  rawRecordId: string;
+  promotedToLeadId: string | null;
   company: string | null;
   product: string | null;
   country: string | null;
@@ -101,6 +103,8 @@ export const listRawMarketLeads = async (
 
     return {
       id: row.id,
+      rawRecordId: row.id,
+      promotedToLeadId: row.leadId,
       company: normalized?.company || null,
       product: normalized?.product || null,
       country: normalized?.country || null,
