@@ -1,18 +1,12 @@
 import { createHash } from "node:crypto";
-import { load } from "cheerio";
-import { enrichCompanyFromMarketResult } from "@/lib/services/company-enrichment";
+import {
+  enrichCompanyFromMarketResult,
+  resolveCompanyWebsiteForCompanyName
+} from "@/lib/services/company-enrichment";
 import { buildCompanyFirstQueryVariants } from "@/lib/services/market-intelligence/company-discovery";
 import type { NormalizedMarketResult, SourceEngineInput, SourceEngineResult } from "../types";
 import { withOriginMeta } from "../source-origin";
-import { fetchPublicHtml, normalizeText, parseFields, runBrowserSourceEngine, truncate } from "./shared";
-
-type SearchCandidate = {
-  title: string;
-  snippet: string;
-  url: string;
-  score: number;
-  query: string;
-};
+import { normalizeText, truncate } from "./shared";
 
 const COUNTRY_TLDS: Record<string, string[]> = {
   uzbekistan: [".uz"],
@@ -50,12 +44,26 @@ const EXCLUDED_HOST_HINTS = [
   "reddit.com",
   "quora.com"
 ];
-const SEARCH_TIMEOUT_MS = 10_000;
-const SEARCH_USER_AGENT = "Mozilla/5.0 (compatible; CommodityTradingCRM/1.0; +https://example.com/contact)";
-const resolvedSearchUrlCache = new Map<string, string | null>();
-const BING_SOFT_NEGATIVE_SITE_TOKENS = ["-site:kompass.com", "-site:europages.com"];
+
 const NON_COMPANY_TEXT_PATTERN =
   /\b(wikipedia|market report|by country|what is|definition|dictionary|forum|reddit|quora|news|video|youtube|health|medical)\b/i;
+
+const COMPANY_SUFFIX_PATTERN =
+  /\b([a-z0-9][a-z0-9&.,'\- ]{1,90}\s(?:llc|ltd|limited|inc|corp|co\.?|company|group|gmbh|sarl|fze|dmcc|pte|ag|bv|srl))\b/gi;
+
+const QUOTED_COMPANY_PATTERN = /["“”]([^"“”]{3,120})["“”]/g;
+const NON_ERROR_DIAGNOSTICS = new Set([
+  "registry_first",
+  "company_name_required",
+  "web_search_fallback_skipped",
+  "web_search_provider_blocked"
+]);
+
+type WebsiteCandidate = {
+  website: string;
+  company: string | null;
+  source: "custom_source" | "query_company";
+};
 
 const toHost = (url: string) => {
   try {
@@ -74,27 +82,18 @@ const toRootUrl = (url: string) => {
   }
 };
 
-const decodeBingUParam = (value: string) => {
+const normalizeWebsiteInput = (value: string) => {
   const normalized = normalizeText(value);
   if (!normalized) return null;
-  if (normalized.startsWith("http://") || normalized.startsWith("https://")) return normalized;
 
-  const decodeBase64 = (raw: string) => {
-    try {
-      return Buffer.from(raw.replace(/-/g, "+").replace(/_/g, "/"), "base64").toString("utf8");
-    } catch {
-      return "";
-    }
-  };
-
-  if (/^a1/i.test(normalized)) {
-    const decoded = decodeBase64(normalized.slice(2));
-    if (decoded.startsWith("http://") || decoded.startsWith("https://")) return decoded;
+  const withProtocol = /^https?:\/\//i.test(normalized) ? normalized : `https://${normalized}`;
+  try {
+    const parsed = new URL(withProtocol);
+    if (!parsed.hostname || !parsed.hostname.includes(".")) return null;
+    return toRootUrl(parsed.toString());
+  } catch {
+    return null;
   }
-
-  const decoded = decodeBase64(normalized);
-  if (decoded.startsWith("http://") || decoded.startsWith("https://")) return decoded;
-  return null;
 };
 
 const isLikelyCompanyHost = (url: string) => {
@@ -102,14 +101,6 @@ const isLikelyCompanyHost = (url: string) => {
   if (!host) return false;
   if (host.endsWith(".gov") || host.endsWith(".edu")) return false;
   return !EXCLUDED_HOST_HINTS.some((hint) => host.includes(hint));
-};
-
-const titleToCompany = (title: string) => {
-  const normalized = normalizeText(title);
-  if (!normalized) return null;
-  const first = normalized.split(/\s+\|\s+|\s+-\s+|•|·/)[0] || normalized;
-  const cleaned = normalizeText(first.replace(/\b(official website|home page|homepage)\b/gi, ""));
-  return cleaned.length >= 2 ? cleaned : null;
 };
 
 const detectResultType = (input: SourceEngineInput) => {
@@ -124,201 +115,38 @@ const detectResultType = (input: SourceEngineInput) => {
   return "company_profile";
 };
 
-const scoreCandidate = (payload: {
-  query: string;
-  title: string;
-  snippet: string;
-  url: string;
-  parsedProduct: string | null;
-  parsedCountry: string | null;
-}) => {
-  const text = `${payload.title} ${payload.snippet}`.toLowerCase();
-  const queryTokens = payload.query
-    .toLowerCase()
-    .split(/\s+/)
-    .map((token) => token.trim())
-    .filter((token) => token.length > 2);
-  const tokenMatches = queryTokens.filter((token) => text.includes(token)).length;
-  const tokenScore = queryTokens.length > 0 ? tokenMatches / queryTokens.length : 0.5;
-
-  const host = toHost(payload.url);
-  let score = 0.3 + tokenScore * 0.4;
-
-  if (payload.parsedProduct && text.includes(payload.parsedProduct.toLowerCase())) score += 0.1;
-  if (payload.parsedCountry && text.includes(payload.parsedCountry.toLowerCase())) score += 0.1;
-  if (/\b(importer|supplier|manufacturer|distributor|wholesale|trading company)\b/.test(text)) score += 0.08;
-  if (/\b(ltd|llc|inc|corp|company|group|trading|export|import)\b/.test(text)) score += 0.06;
-  if (/\b(wiki|wikipedia|forum|reddit|quora|blog|news|health|dictionary|encyclopedia)\b/.test(text)) score -= 0.14;
-
-  if (payload.parsedCountry) {
-    const tlds = COUNTRY_TLDS[payload.parsedCountry.toLowerCase()] || [];
-    if (tlds.some((tld) => host.endsWith(tld))) score += 0.08;
-  }
-
-  return Number(Math.max(0.05, Math.min(score, 0.99)).toFixed(2));
+const inferCompanyFromHost = (url: string) => {
+  const host = toHost(url);
+  if (!host) return null;
+  const base = host.split(".")[0] || "";
+  const human = normalizeText(base.replace(/[-_]+/g, " "));
+  return human.length >= 2 ? human : null;
 };
 
-const resolveSearchResultUrl = async (href: string) => {
-  const raw = normalizeText(href);
-  if (!raw) return null;
-  if (resolvedSearchUrlCache.has(raw)) {
-    return resolvedSearchUrlCache.get(raw) || null;
-  }
+const extractCompanyNamesFromQuery = (query: string) => {
+  const text = normalizeText(query);
+  if (!text) return [];
 
-  let absolute = raw;
-  try {
-    absolute = raw.startsWith("http") ? raw : new URL(raw, "https://www.bing.com").toString();
-  } catch {
-    resolvedSearchUrlCache.set(raw, null);
-    return null;
-  }
+  const items = new Set<string>();
 
-  if (isLikelyCompanyHost(absolute)) {
-    resolvedSearchUrlCache.set(raw, absolute);
-    return absolute;
-  }
-
-  const parsedHost = toHost(absolute);
-  if (!parsedHost.includes("bing.com")) {
-    resolvedSearchUrlCache.set(raw, null);
-    return null;
-  }
-
-  try {
-    const parsed = new URL(absolute);
-    const uParam = parsed.searchParams.get("u");
-    if (uParam) {
-      const decoded = decodeBingUParam(uParam);
-      if (decoded && isLikelyCompanyHost(decoded)) {
-        resolvedSearchUrlCache.set(raw, decoded);
-        return decoded;
-      }
+  const quotedMatches = text.matchAll(QUOTED_COMPANY_PATTERN);
+  for (const match of quotedMatches) {
+    const name = normalizeText(match[1]);
+    if (name.length >= 3 && !NON_COMPANY_TEXT_PATTERN.test(name)) {
+      items.add(name);
     }
-  } catch {
-    // fallback to redirect-follow fetch
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
-  try {
-    const response = await fetch(absolute, {
-      method: "GET",
-      redirect: "follow",
-      cache: "no-store",
-      headers: {
-        "user-agent": SEARCH_USER_AGENT,
-        "accept-language": "en-US,en;q=0.8"
-      },
-      signal: controller.signal
-    });
-    const finalUrl = response.url || "";
-    const resolved = isLikelyCompanyHost(finalUrl) ? finalUrl : null;
-    resolvedSearchUrlCache.set(raw, resolved);
-    return resolved;
-  } catch {
-    resolvedSearchUrlCache.set(raw, null);
-    return null;
-  } finally {
-    clearTimeout(timeout);
+  const suffixMatches = text.matchAll(COMPANY_SUFFIX_PATTERN);
+  for (const match of suffixMatches) {
+    const name = normalizeText(match[1]);
+    if (name.length >= 3 && !NON_COMPANY_TEXT_PATTERN.test(name)) {
+      items.add(name);
+    }
   }
+
+  return Array.from(items).slice(0, 10);
 };
-
-const extractBingCandidates = (payload: {
-  html: string;
-  query: string;
-  parsedProduct: string | null;
-  parsedCountry: string | null;
-}) => {
-  const $ = load(payload.html);
-  const candidates: SearchCandidate[] = [];
-
-  $("li.b_algo").each((_, node) => {
-    if (candidates.length >= 40) return;
-    const anchor = $(node).find("h2 a").first();
-    const href = normalizeText(anchor.attr("href"));
-    const title = normalizeText(anchor.text());
-    const snippet = normalizeText($(node).find(".b_caption p").first().text() || $(node).find("p").first().text());
-    if (!href || !title) return;
-    if (NON_COMPANY_TEXT_PATTERN.test(`${title} ${snippet}`)) return;
-    candidates.push({
-      title,
-      snippet,
-      url: href,
-      score: 0,
-      query: payload.query
-    });
-  });
-
-  return candidates;
-};
-
-const extractBraveCandidates = (payload: {
-  html: string;
-  query: string;
-  parsedProduct: string | null;
-  parsedCountry: string | null;
-}) => {
-  const $ = load(payload.html);
-  const candidates: SearchCandidate[] = [];
-  const seen = new Set<string>();
-
-  $("#results a[href^='http'], main a[href^='http']").each((_, node) => {
-    if (candidates.length >= 60) return;
-
-    const anchor = $(node);
-    const href = normalizeText(anchor.attr("href"));
-    if (!href) return;
-    if (seen.has(href)) return;
-    seen.add(href);
-
-    const host = toHost(href);
-    if (!host || host.includes("search.brave.com") || host.includes("imgs.search.brave.com")) return;
-    if (!isLikelyCompanyHost(href)) return;
-
-    const title = normalizeText(anchor.text() || anchor.attr("title") || "");
-    if (title.length < 2) return;
-    const snippet = normalizeText(anchor.closest("div").text() || "");
-    if (NON_COMPANY_TEXT_PATTERN.test(`${title} ${snippet}`)) return;
-
-    candidates.push({
-      title,
-      snippet,
-      url: href,
-      score: scoreCandidate({
-        query: payload.query,
-        title,
-        snippet,
-        url: href,
-        parsedProduct: payload.parsedProduct,
-        parsedCountry: payload.parsedCountry
-      }),
-      query: payload.query
-    });
-  });
-
-  return candidates
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 40);
-};
-
-const buildSearchUrls = (input: SourceEngineInput) => {
-  const variants = buildCompanyFirstQueryVariants(input.parsedQuery);
-  const queryList = variants.flatMap((query) => {
-    const softFiltered = `${query} ${BING_SOFT_NEGATIVE_SITE_TOKENS.join(" ")}`.trim();
-    return [query, softFiltered];
-  });
-
-  return Array.from(new Set(queryList))
-    .map(
-      (query) => `https://www.bing.com/search?q=${encodeURIComponent(query)}&setlang=en-us&mkt=en-US&cc=us&ensearch=1`
-    )
-    .slice(0, 12);
-};
-
-const buildBraveSearchUrls = (input: SourceEngineInput) =>
-  buildCompanyFirstQueryVariants(input.parsedQuery)
-    .slice(0, 6)
-    .map((query) => `https://search.brave.com/search?q=${encodeURIComponent(query)}&source=web`);
 
 const contactCompletenessScore = (input: {
   website: string | null;
@@ -344,203 +172,196 @@ const buildStatus = (payload: {
   blocked: boolean;
   warnings: string[];
   extractedResults: number;
-  sawHtml: boolean;
+  sawSignals: boolean;
 }) => {
+  const diagnosticsOnly =
+    payload.warnings.length > 0 && payload.warnings.every((item) => NON_ERROR_DIAGNOSTICS.has(item));
+
   if (payload.extractedResults > 0) {
     return { status: "ok" as const, parse_status: "success" as const };
   }
   if (payload.blocked) {
-    return { status: "blocked" as const, parse_status: payload.sawHtml ? ("empty" as const) : ("failed" as const) };
+    return { status: "blocked" as const, parse_status: payload.sawSignals ? ("empty" as const) : ("failed" as const) };
+  }
+  if (diagnosticsOnly) {
+    return { status: "ok" as const, parse_status: payload.sawSignals ? ("empty" as const) : ("skipped" as const) };
   }
   if (payload.warnings.length > 0) {
-    return { status: "error" as const, parse_status: payload.sawHtml ? ("empty" as const) : ("failed" as const) };
+    return { status: "error" as const, parse_status: payload.sawSignals ? ("empty" as const) : ("failed" as const) };
   }
-  return { status: "ok" as const, parse_status: payload.sawHtml ? ("empty" as const) : ("failed" as const) };
+  return { status: "ok" as const, parse_status: payload.sawSignals ? ("empty" as const) : ("failed" as const) };
+};
+
+const confidenceFromSignals = (payload: {
+  base: number;
+  website: string;
+  company: string | null;
+  country: string | null;
+  product: string | null;
+  contactScore: number;
+  websiteResolvedBySearch: boolean;
+  websiteCrawled: boolean;
+}) => {
+  let score = payload.base;
+  score += payload.contactScore * 0.3;
+  if (payload.websiteResolvedBySearch) score += 0.08;
+  if (payload.websiteCrawled) score += 0.06;
+
+  const host = toHost(payload.website);
+  if (payload.country) {
+    const tlds = COUNTRY_TLDS[payload.country.toLowerCase()] || [];
+    if (tlds.some((tld) => host.endsWith(tld))) {
+      score += 0.04;
+    }
+  }
+
+  if (payload.company && payload.company.length >= 2) score += 0.03;
+  if (payload.product) score += 0.02;
+
+  return Number(Math.max(0.1, Math.min(0.99, score)).toFixed(2));
 };
 
 export const runDirectWebsitesEngine = async (input: SourceEngineInput): Promise<SourceEngineResult> => {
   const executionMode = input.executionMode || input.source.executionMode || "fetch";
-  const searchUrls = buildSearchUrls(input);
-  const braveSearchUrls = buildBraveSearchUrls(input);
-  const warnings: string[] = [];
+  const warningsSet = new Set<string>();
   const fetchedUrls: string[] = [];
   const httpStatuses: number[] = [];
   let blocked = false;
   let antiBotDetected = false;
-  let sawHtml = false;
+  let sawSignals = false;
 
-  const candidatesByHost = new Map<string, SearchCandidate>();
+  const knownCompanyNames = extractCompanyNamesFromQuery(input.parsedQuery.query);
+  const knownWebsites = (input.parsedQuery.custom_sources || [])
+    .map((item) => normalizeWebsiteInput(item))
+    .filter((item): item is string => Boolean(item))
+    .filter((item) => isLikelyCompanyHost(item));
 
-  if (executionMode === "browser") {
-    const browserResult = await runBrowserSourceEngine({
-      sourceId: "direct_websites",
-      sourceName: "Direct Company Websites",
-      parsedQuery: input.parsedQuery,
-      searchUrls,
-      maxResults: Math.max(input.maxResults * 3, 18),
-      resultTypeHint: detectResultType(input),
-      includePathHints: [],
-      excludePathHints: []
-    });
-    fetchedUrls.push(...browserResult.fetchedUrls);
-    httpStatuses.push(...browserResult.http_statuses);
-    warnings.push(...browserResult.warnings);
-    blocked = browserResult.blocked;
-    antiBotDetected = browserResult.anti_bot_detected;
-    sawHtml = browserResult.parse_status !== "failed";
+  const candidatesByHost = new Map<string, WebsiteCandidate>();
 
-    for (const item of browserResult.results) {
-      const resolved = await resolveSearchResultUrl(item.source_url);
-      if (!resolved) continue;
-      const host = toHost(resolved);
-      if (!host || !isLikelyCompanyHost(resolved)) continue;
-      const score = scoreCandidate({
-        query: input.parsedQuery.query,
-        title: item.company || item.description,
-        snippet: item.description,
-        url: resolved,
-        parsedProduct: input.parsedQuery.product,
-        parsedCountry: input.parsedQuery.target_country_or_region
+  const addCandidate = (candidate: WebsiteCandidate) => {
+    const host = toHost(candidate.website);
+    if (!host || !isLikelyCompanyHost(candidate.website)) return;
+    if (!candidatesByHost.has(host)) {
+      candidatesByHost.set(host, {
+        website: toRootUrl(candidate.website),
+        company: candidate.company,
+        source: candidate.source
       });
-      if (!candidatesByHost.has(host)) {
-        candidatesByHost.set(host, {
-          title: item.company || item.description,
-          snippet: item.description,
-          url: resolved,
-          score: Math.max(item.confidence_score, score),
-          query: input.parsedQuery.query
-        });
-      }
     }
-  } else {
-    for (const searchUrl of searchUrls) {
-      fetchedUrls.push(searchUrl);
-      try {
-        const { html, status } = await fetchPublicHtml(searchUrl);
-        sawHtml = true;
-        httpStatuses.push(status);
+  };
 
-        const url = new URL(searchUrl);
-        const query = url.searchParams.get("q") || input.parsedQuery.query;
-        const candidates = extractBingCandidates({
-          html,
-          query,
-          parsedProduct: input.parsedQuery.product,
-          parsedCountry: input.parsedQuery.target_country_or_region
-        });
+  knownWebsites.forEach((website) => {
+    addCandidate({
+      website,
+      company: inferCompanyFromHost(website),
+      source: "custom_source"
+    });
+  });
 
-        for (const candidate of candidates) {
-          const resolved = await resolveSearchResultUrl(candidate.url);
-          if (!resolved) continue;
-          const host = toHost(resolved);
-          if (!host) continue;
-          const score = scoreCandidate({
-            query: candidate.query,
-            title: candidate.title,
-            snippet: candidate.snippet,
-            url: resolved,
-            parsedProduct: input.parsedQuery.product,
-            parsedCountry: input.parsedQuery.target_country_or_region
-          });
+  if (knownCompanyNames.length === 0) {
+    warningsSet.add("registry_first");
+  }
 
-          const current = candidatesByHost.get(host);
-          if (!current || score > current.score) {
-            candidatesByHost.set(host, {
-              ...candidate,
-              url: resolved,
-              score
-            });
-          }
-        }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "failed to fetch search page";
-        warnings.push(`${searchUrl}: ${message}`);
-        if (/\b(blocked|challenge|captcha|anti-bot|403)\b/i.test(message)) {
-          blocked = true;
-          antiBotDetected = true;
-        }
-      }
+  for (const companyName of knownCompanyNames) {
+    const resolution = await resolveCompanyWebsiteForCompanyName({
+      companyName,
+      country: input.parsedQuery.target_country_or_region || input.parsedQuery.buyer_country || null,
+      productHint: input.parsedQuery.product || null
+    });
+
+    if (resolution.url) {
+      sawSignals = true;
+      fetchedUrls.push(resolution.url);
+      addCandidate({
+        website: resolution.url,
+        company: companyName,
+        source: "query_company"
+      });
+      continue;
     }
 
-    const shouldTryBrave = candidatesByHost.size < Math.max(4, input.maxResults);
-    if (shouldTryBrave) {
-      const beforeBrave = candidatesByHost.size;
-      for (const searchUrl of braveSearchUrls) {
-        if (candidatesByHost.size >= Math.max(input.maxResults * 2, 12)) break;
-        fetchedUrls.push(searchUrl);
-        try {
-          const { html, status } = await fetchPublicHtml(searchUrl);
-          sawHtml = true;
-          httpStatuses.push(status);
-
-          const url = new URL(searchUrl);
-          const query = url.searchParams.get("q") || input.parsedQuery.query;
-          const candidates = extractBraveCandidates({
-            html,
-            query,
-            parsedProduct: input.parsedQuery.product,
-            parsedCountry: input.parsedQuery.target_country_or_region
-          });
-
-          for (const candidate of candidates) {
-            const host = toHost(candidate.url);
-            if (!host) continue;
-            const current = candidatesByHost.get(host);
-            if (!current || candidate.score > current.score) {
-              candidatesByHost.set(host, candidate);
-            }
-          }
-        } catch (error) {
-          const message = error instanceof Error ? error.message : "failed to fetch Brave search page";
-          warnings.push(`${searchUrl}: ${message}`);
-        }
-      }
-      const braveAdded = Math.max(0, candidatesByHost.size - beforeBrave);
-      warnings.push(`Company-first fallback: Brave source-native search added ${braveAdded} candidate host(s).`);
+    if (resolution.status === "provider_missing") {
+      warningsSet.add("web_search_fallback_skipped");
+    } else if (resolution.status === "provider_blocked") {
+      warningsSet.add("web_search_provider_blocked");
+      blocked = true;
+      antiBotDetected = true;
     }
   }
 
-  const shortlisted = Array.from(candidatesByHost.values())
-    .sort((a, b) => b.score - a.score)
-    .slice(0, Math.max(input.maxResults * 2, 12));
+  if (knownCompanyNames.length === 0 && knownWebsites.length === 0) {
+    warningsSet.add("company_name_required");
+    if (!process.env.BRAVE_SEARCH_API_KEY) {
+      warningsSet.add("web_search_fallback_skipped");
+    }
 
+    const warnings = Array.from(warningsSet);
+    const statusMeta = buildStatus({
+      blocked,
+      warnings,
+      extractedResults: 0,
+      sawSignals
+    });
+
+    return {
+      sourceId: "direct_websites",
+      sourceName: "Direct Company Websites",
+      execution_mode: executionMode,
+      fetchedUrls,
+      warnings,
+      http_statuses: httpStatuses,
+      response_status: httpStatuses[0] ?? null,
+      blocked,
+      anti_bot_detected: antiBotDetected,
+      parse_status: statusMeta.parse_status,
+      status: statusMeta.status,
+      extracted_results: 0,
+      results: []
+    };
+  }
+
+  const shortlisted = Array.from(candidatesByHost.values()).slice(0, Math.max(input.maxResults * 2, 12));
   const resultType = detectResultType(input);
   const enriched: NormalizedMarketResult[] = [];
 
   for (const candidate of shortlisted) {
     if (enriched.length >= input.maxResults) break;
-    const company = titleToCompany(candidate.title);
-    const canonicalUrl = toRootUrl(candidate.url);
+
+    const canonicalUrl = toRootUrl(candidate.website);
+    const provisionalCompany = normalizeText(candidate.company || inferCompanyFromHost(canonicalUrl) || "") || null;
+
     const provisional = withOriginMeta(
       {
-        id: createHash("sha1").update(`direct_websites|${canonicalUrl}`).digest("hex").slice(0, 16),
+        id: createHash("sha1").update(`direct_websites|${canonicalUrl}|${provisionalCompany || "company"}`).digest("hex").slice(0, 16),
         product: input.parsedQuery.product,
-        company,
+        company: provisionalCompany,
         contact_name: null,
         country: input.parsedQuery.target_country_or_region || null,
         quantity: null,
         incoterms: null,
         payment_terms: null,
-        description: truncate(candidate.snippet || candidate.title, 900),
+        description: truncate(`${provisionalCompany || "Company"} • ${canonicalUrl}`, 900),
         source_name: "Direct Company Websites",
         source_url: canonicalUrl,
         raw_text: truncate(
           [
-            `Discovery query: ${candidate.query}`,
-            `Title: ${candidate.title}`,
-            `Snippet: ${candidate.snippet}`,
-            `Candidate URL: ${candidate.url}`
+            `Discovery mode: registry_first`,
+            `Candidate source: ${candidate.source}`,
+            `Company: ${provisionalCompany || "unknown"}`,
+            `Website: ${canonicalUrl}`,
+            `Query: ${input.parsedQuery.query}`,
+            `Rewrites: ${buildCompanyFirstQueryVariants(input.parsedQuery).slice(0, 4).join(" | ")}`
           ]
             .filter(Boolean)
             .join("\n"),
-          15000
+          16000
         ),
         result_type: resultType,
-        confidence_score: candidate.score,
+        confidence_score: candidate.source === "query_company" ? 0.58 : 0.52,
         shipping_terms: null,
         destination: input.parsedQuery.destination_country || null,
         posted_date: null,
-        acquisition_origin: executionMode === "browser" ? "browser_fallback" : "company_website"
+        acquisition_origin: "company_website"
       },
       executionMode
     );
@@ -551,6 +372,7 @@ export const runDirectWebsitesEngine = async (input: SourceEngineInput): Promise
         companyCountry: input.parsedQuery.target_country_or_region || null,
         productHint: input.parsedQuery.product || null
       });
+
       const contactScore = contactCompletenessScore({
         website: enrichment.website,
         email: enrichment.email,
@@ -561,38 +383,34 @@ export const runDirectWebsitesEngine = async (input: SourceEngineInput): Promise
         telegram: enrichment.telegram
       });
 
-      const confidence = Number(
-        Math.max(
-          provisional.confidence_score,
-          Math.min(
-            0.99,
-            provisional.confidence_score * 0.72 +
-              contactScore * 0.28 +
-              (enrichment.websiteResolvedBySearch ? 0.08 : 0) +
-              (enrichment.websiteCrawled ? 0.06 : 0)
-          )
-        ).toFixed(2)
-      );
-
-      const contactsFromText = parseFields(candidate.snippet);
       const website = normalizeText(enrichment.website || canonicalUrl);
-      const mergedCompany = normalizeText(enrichment.companyName || company || "");
-      const mergedCountry = normalizeText(enrichment.country || input.parsedQuery.target_country_or_region || "");
-      const mergedContact = normalizeText(enrichment.contactName || contactsFromText.contact || "");
-      const looksNonCompany = NON_COMPANY_TEXT_PATTERN.test(`${mergedCompany} ${candidate.title} ${candidate.snippet}`);
-      if (looksNonCompany && contactScore < 0.4) continue;
+      const company = normalizeText(enrichment.companyName || provisional.company || "") || provisional.company;
+      const country = normalizeText(enrichment.country || input.parsedQuery.target_country_or_region || "") || provisional.country;
+      const looksNonCompany = NON_COMPANY_TEXT_PATTERN.test(`${company || ""} ${canonicalUrl}`);
+      if (looksNonCompany && contactScore < 0.35) continue;
+
+      const confidence = confidenceFromSignals({
+        base: provisional.confidence_score,
+        website,
+        company,
+        country,
+        product: provisional.product,
+        contactScore,
+        websiteResolvedBySearch: enrichment.websiteResolvedBySearch,
+        websiteCrawled: enrichment.websiteCrawled
+      });
 
       const finalResult = withOriginMeta(
         {
           ...provisional,
           source_url: website || provisional.source_url,
-          company: mergedCompany || provisional.company,
-          country: mergedCountry || provisional.country,
-          contact_name: mergedContact || provisional.contact_name,
+          company,
+          country,
+          contact_name: normalizeText(enrichment.contactName || "") || provisional.contact_name,
           description: truncate(
             [
-              mergedCompany || provisional.company || "Company",
-              mergedCountry ? `(${mergedCountry})` : "",
+              company || "Company",
+              country ? `(${country})` : "",
               provisional.product ? `• ${provisional.product}` : "",
               enrichment.email ? `• ${enrichment.email}` : "",
               enrichment.phone ? `• ${enrichment.phone}` : ""
@@ -619,14 +437,14 @@ export const runDirectWebsitesEngine = async (input: SourceEngineInput): Promise
           ),
           confidence_score: confidence,
           contact_completeness_score: contactScore,
-          acquisition_origin: enrichment.websiteCrawled || enrichment.websiteResolvedBySearch ? "company_website" : provisional.acquisition_origin
+          acquisition_origin: "company_website"
         },
         executionMode
       );
 
       enriched.push(finalResult);
     } catch (error) {
-      warnings.push(`${canonicalUrl}: enrichment failed (${error instanceof Error ? error.message : "unknown"})`);
+      warningsSet.add(`enrichment_failed:${error instanceof Error ? error.message : "unknown"}`);
       enriched.push(provisional);
     }
   }
@@ -643,18 +461,20 @@ export const runDirectWebsitesEngine = async (input: SourceEngineInput): Promise
     .sort((a, b) => b.confidence_score - a.confidence_score)
     .slice(0, input.maxResults);
 
-  if (deduped.length === 0) {
-    warnings.push("Direct company discovery returned no usable company websites.");
-  } else {
-    const rewriteInfo = buildCompanyFirstQueryVariants(input.parsedQuery).slice(0, 3).join(" | ");
-    warnings.push(`Company-first search rewrites: ${rewriteInfo}`);
+  if (input.parsedQuery.product_category === "food_agriculture") {
+    warningsSet.add("registry_first");
   }
 
+  if (deduped.length === 0 && !warningsSet.has("company_name_required")) {
+    warningsSet.add("registry_first");
+  }
+
+  const warnings = Array.from(warningsSet);
   const statusMeta = buildStatus({
     blocked,
     warnings,
     extractedResults: deduped.length,
-    sawHtml
+    sawSignals: sawSignals || shortlisted.length > 0
   });
 
   return {
