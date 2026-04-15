@@ -554,7 +554,7 @@ export const enrichCompanyFromMarketResult = async (
   const shouldResolveWebsite = result.company && (weakStructure || (options.preferDirectWebsite && weakContactCoverage));
   if (shouldResolveWebsite) {
     const resolved = await resolveCompanyWebsite({
-      companyName: result.company,
+      companyName: result.company ?? '',
       country: options.companyCountry || result.country || null,
       productHint: options.productHint || result.product || null
     });
