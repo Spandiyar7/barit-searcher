@@ -167,7 +167,10 @@ const computeResultOrigins = (results: SourceEngineResult["results"]): NonNullab
 export const executeSourceWithFallback = async (
   sourceId: SourceId,
   parsedQuery: ParsedQuery,
-  maxResults: number
+  maxResults: number,
+  options?: {
+    allowAutomatedIndexFallback?: boolean;
+  }
 ): Promise<{ result: SourceEngineResult; attempted_modes: SourceExecutionMode[]; trace: SourceExecutionTrace }> => {
   const source = SOURCE_BY_ID.get(sourceId);
 
@@ -244,6 +247,24 @@ export const executeSourceWithFallback = async (
   };
 
   if (source.executionMode === "manual") {
+    if (!options?.allowAutomatedIndexFallback) {
+      const trace: SourceExecutionTrace = {
+        source_id: sourceId,
+        no_adapter: false,
+        native_attempted: false,
+        native_success: false,
+        fallback_attempted: false,
+        fallback_success: false,
+        fallback_blocked: false,
+        fallback_error: false,
+        empty_results: true
+      };
+      return {
+        result: manualModeResult(sourceId, source.name, `${source.name}: manual execution mode configured in source registry.`),
+        attempted_modes: ["manual"],
+        trace
+      };
+    }
     return runAutomatedFallback(`${source.name}: manual execution mode configured; automated index fallback attempted.`, {
       noAdapter: false,
       fallbackAttemptedFrom: ["manual", "fetch"]
@@ -252,6 +273,24 @@ export const executeSourceWithFallback = async (
 
   const engine = MARKET_SOURCE_ENGINES[sourceId];
   if (!engine) {
+    if (!options?.allowAutomatedIndexFallback) {
+      const trace: SourceExecutionTrace = {
+        source_id: sourceId,
+        no_adapter: true,
+        native_attempted: false,
+        native_success: false,
+        fallback_attempted: false,
+        fallback_success: false,
+        fallback_blocked: false,
+        fallback_error: false,
+        empty_results: true
+      };
+      return {
+        result: manualModeResult(sourceId, source.name, `${source.name}: no native engine implemented in source registry.`),
+        attempted_modes: ["manual"],
+        trace
+      };
+    }
     return runAutomatedFallback(
       `${source.name}: no native engine implemented; automated index fallback attempted.`,
       {
@@ -318,6 +357,7 @@ export const executeSourceWithFallback = async (
 
   const mergedAfterPrimary = mergeSourceEngineRuns(runs);
   const shouldUseAutomatedIndexFallback =
+    Boolean(options?.allowAutomatedIndexFallback) &&
     mergedAfterPrimary.results.length === 0 &&
     (mergedAfterPrimary.blocked ||
       mergedAfterPrimary.anti_bot_detected ||

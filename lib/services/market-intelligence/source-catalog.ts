@@ -1,4 +1,13 @@
-import type { ProductCategory, SearchIntent, SourceDescriptor, SourceGroup, SourceId } from "./types";
+import type {
+  ContactRichness,
+  ProductCategory,
+  SearchIntent,
+  SourceDescriptor,
+  SourceGroup,
+  SourceId,
+  SourceRegion,
+  SourceResultType
+} from "./types";
 
 type SourceSeed = {
   id: SourceId;
@@ -13,6 +22,10 @@ type SourceSeed = {
   reliabilityScore?: number;
   priorityTier?: SourceDescriptor["priorityTier"];
   purpose?: SourceDescriptor["purpose"];
+  approved?: boolean;
+  resultType?: SourceDescriptor["resultType"];
+  regions?: SourceDescriptor["regions"];
+  contactRichness?: SourceDescriptor["contactRichness"];
   industrySpecialization?: string[];
   productCategoryFit?: ProductCategory[];
   defaultRankingWeight?: number;
@@ -28,7 +41,63 @@ const ALL_TRADE_INTENTS: SearchIntent[] = [
   "deals"
 ];
 
+const GROUP_RESULT_TYPE: Record<SourceGroup, SourceResultType> = {
+  rfq_platforms: "marketplace",
+  supplier_platforms: "manufacturer_site",
+  directories: "company_directory",
+  analytics: "analytics",
+  direct_websites: "manufacturer_site"
+};
+
+const GROUP_CONTACT_RICHNESS: Record<SourceGroup, ContactRichness> = {
+  rfq_platforms: "medium",
+  supplier_platforms: "medium",
+  directories: "high",
+  analytics: "low",
+  direct_websites: "high"
+};
+
+const SOURCE_REGION_OVERRIDES: Partial<Record<SourceId, SourceRegion[]>> = {
+  kompass: ["global", "europe", "asia", "mena"],
+  europages: ["europe", "global"],
+  thomasnet: ["north_america"],
+  globalspec: ["north_america", "global"],
+  satu_kz: ["cis", "asia"],
+  avito: ["cis", "europe"],
+  all_biz: ["cis", "europe", "asia"],
+  tiuru: ["cis"],
+  optlist: ["cis", "europe"],
+  agroserver: ["cis", "asia"],
+  flagma: ["cis", "europe"],
+  agro_kg: ["asia", "cis"],
+  tajagro: ["asia", "cis"],
+  gieldarolna: ["europe"],
+  gratka: ["europe"],
+  turkishexporter: ["europe", "mena"],
+  argus_media: ["global"],
+  spglobal_platts: ["global"],
+  panjiva: ["global"],
+  volza: ["global"],
+  seair: ["asia", "global"],
+  direct_websites: ["global", "europe", "asia", "mena", "cis", "africa", "latin_america", "north_america"]
+};
+
+const LOCAL_LISTING_SOURCE_IDS = new Set<SourceId>([
+  "satu_kz",
+  "avito",
+  "all_biz",
+  "tiuru",
+  "optlist",
+  "agroserver",
+  "flagma",
+  "agro_kg",
+  "tajagro",
+  "gieldarolna",
+  "gratka"
+]);
+
 const buildSource = (seed: SourceSeed): SourceDescriptor => ({
+  approved: true,
   supportsCountries: true,
   engineAvailable: false,
   executionMode: "manual",
@@ -37,6 +106,9 @@ const buildSource = (seed: SourceSeed): SourceDescriptor => ({
   reliabilityScore: 35,
   priorityTier: 2,
   purpose: "listing",
+  resultType: LOCAL_LISTING_SOURCE_IDS.has(seed.id) ? "local_listing" : GROUP_RESULT_TYPE[seed.group],
+  regions: SOURCE_REGION_OVERRIDES[seed.id] || ["global"],
+  contactRichness: GROUP_CONTACT_RICHNESS[seed.group],
   industrySpecialization: ["general_trade"],
   productCategoryFit: [
     "petrochemicals",

@@ -92,7 +92,12 @@ const localizeSourceReason = (reason: string, t: (key: string, fallback?: string
     { pattern: /Company-first website priority/gi, key: "marketIntelligence.reason.companyFirstWebsitePriority" },
     { pattern: /Local directory priority/gi, key: "marketIntelligence.reason.localDirectoryPriority" },
     { pattern: /Business listing priority/gi, key: "marketIntelligence.reason.businessListingPriority" },
-    { pattern: /Directory fallback for food\/agri/gi, key: "marketIntelligence.reason.directoryFallbackFoodAgri" }
+    { pattern: /Directory fallback for food\/agri/gi, key: "marketIntelligence.reason.directoryFallbackFoodAgri" },
+    { pattern: /Category priority source/gi, key: "marketIntelligence.reason.categoryPrioritySource" },
+    { pattern: /Category deprioritized source/gi, key: "marketIntelligence.reason.categoryDeprioritizedSource" },
+    { pattern: /Contact-rich source/gi, key: "marketIntelligence.reason.contactRichSource" },
+    { pattern: /Low contact richness/gi, key: "marketIntelligence.reason.lowContactRichness" },
+    { pattern: /Analytics source for signal context/gi, key: "marketIntelligence.reason.analyticsSignalContext" }
   ];
 
   let localized = reason;
@@ -118,6 +123,16 @@ const localizeOrigin = (
   if (origin === "company_website") return t("marketIntelligence.resultOrigin.companyWebsite");
   if (origin === "browser_fallback") return t("marketIntelligence.resultOrigin.browserFallback");
   return t("marketIntelligence.resultOrigin.unknown");
+};
+
+const localizeSkippedReason = (
+  reasonCode: string,
+  reason: string,
+  t: (key: string, fallback?: string) => string
+) => {
+  const key = `marketIntelligence.skippedReason.${reasonCode}`;
+  const localized = t(key, "");
+  return localized || reason;
 };
 
 export function MarketIntelligenceClient({ locale }: { locale: Locale }) {
@@ -656,6 +671,43 @@ export function MarketIntelligenceClient({ locale }: { locale: Locale }) {
                 </div>
               ))}
             </div>
+          </Card>
+
+          <Card>
+            <CardTitle>{t("marketIntelligence.sourceRegistry", "Source Registry")}</CardTitle>
+            <div className="mt-3 space-y-2 text-xs text-slate-600">
+              <p>
+                <span className="font-medium text-slate-900">
+                  {t("marketIntelligence.registryApproved", "Approved sources")}:
+                </span>{" "}
+                {snapshot.source_registry.total_approved}
+              </p>
+              <p>
+                <span className="font-medium text-slate-900">
+                  {t("marketIntelligence.registrySearched", "Searched")}:
+                </span>{" "}
+                {snapshot.source_registry.selected_count}
+              </p>
+              <p>
+                <span className="font-medium text-slate-900">
+                  {t("marketIntelligence.registrySkipped", "Skipped")}:
+                </span>{" "}
+                {snapshot.source_registry.skipped_count}
+              </p>
+            </div>
+            {snapshot.skipped_sources.length ? (
+              <div className="mt-3 space-y-2">
+                {snapshot.skipped_sources.slice(0, 12).map((item) => (
+                  <div key={`skipped-${item.source_id}`} className="rounded-lg border border-border px-3 py-2">
+                    <div className="flex items-center justify-between gap-3 text-xs">
+                      <span className="font-medium text-slate-900">{item.source_name}</span>
+                      <span className="rounded bg-slate-100 px-2 py-0.5 text-[10px] text-slate-600">{item.reason_code}</span>
+                    </div>
+                    <p className="mt-1 text-[11px] text-slate-500">{localizeSkippedReason(item.reason_code, item.reason, t)}</p>
+                  </div>
+                ))}
+              </div>
+            ) : null}
           </Card>
         </div>
       ) : null}

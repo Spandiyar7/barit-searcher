@@ -18,6 +18,9 @@ export type SearchPriority = "high" | "medium" | "low";
 export type TradingSignalFocus = "importer" | "exporter" | "recurring_buyer" | "manufacturer" | "general";
 export type SourcePriorityTier = 1 | 2 | 3;
 export type SourcePurpose = "listing" | "signal" | "directory";
+export type SourceResultType = "company_directory" | "marketplace" | "analytics" | "local_listing" | "manufacturer_site";
+export type SourceRegion = "global" | "europe" | "cis" | "mena" | "asia" | "north_america" | "latin_america" | "africa";
+export type ContactRichness = "high" | "medium" | "low";
 export type ProductCategory =
   | "petrochemicals"
   | "fuels"
@@ -95,8 +98,12 @@ export type SourceDescriptor = {
   id: SourceId;
   name: string;
   group: SourceGroup;
+  approved: boolean;
   priorityTier: SourcePriorityTier;
   purpose: SourcePurpose;
+  resultType: SourceResultType;
+  regions: SourceRegion[];
+  contactRichness: ContactRichness;
   industrySpecialization: string[];
   productCategoryFit: ProductCategory[];
   defaultRankingWeight: number;
@@ -142,8 +149,12 @@ export type SourceRecommendation = {
   source_id: SourceId;
   source_name: string;
   group: SourceGroup;
+  approved: boolean;
   priority_tier: SourcePriorityTier;
   purpose: SourcePurpose;
+  result_type: SourceResultType;
+  regions: SourceRegion[];
+  contact_richness: ContactRichness;
   product_category_fit: ProductCategory[];
   industry_specialization: string[];
   score: number;
@@ -152,6 +163,19 @@ export type SourceRecommendation = {
   execution_mode: SourceExecutionMode;
   anti_bot_risk: AntiBotRisk;
   reliability_score: number;
+};
+
+export type SourceSkipDiagnostic = {
+  source_id: SourceId;
+  source_name: string;
+  reason: string;
+  reason_code:
+    | "not_approved"
+    | "category_mismatch"
+    | "intent_mismatch"
+    | "tier_fallback"
+    | "no_adapter"
+    | "lower_ranked";
 };
 
 export type MarketRole = "buyer" | "supplier" | "trader" | "importer" | "exporter";
@@ -255,6 +279,12 @@ export type SourceExecutionTrace = {
 export type MarketIntelligenceSearchResponse = {
   parsed_query: ParsedQuery;
   recommended_sources: SourceRecommendation[];
+  skipped_sources: SourceSkipDiagnostic[];
+  source_registry: {
+    total_approved: number;
+    selected_count: number;
+    skipped_count: number;
+  };
   executed_sources: string[];
   source_diagnostics: SourceDiagnostic[];
   warnings: string[];
@@ -357,6 +387,12 @@ export type MarketIntelligenceJobSnapshot = {
   job: SearchJobSummary;
   parsed_query: ParsedQuery;
   recommended_sources: SourceRecommendation[];
+  skipped_sources: SourceSkipDiagnostic[];
+  source_registry: {
+    total_approved: number;
+    selected_count: number;
+    skipped_count: number;
+  };
   source_diagnostics: SourceDiagnostic[];
   source_runs: SearchJobSourceRun[];
   warnings: string[];

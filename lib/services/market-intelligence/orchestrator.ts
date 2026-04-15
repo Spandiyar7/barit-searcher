@@ -1,7 +1,8 @@
-import { recommendSources } from "./source-selection";
+import { planSourceSelection } from "./source-selection";
 import { understandMarketQuery } from "./query-understanding";
 import { enrichResultsWithAi } from "./ai-analysis";
 import { executeSourceWithFallback, buildSourceDiagnostics } from "./execution";
+import { filterPrimaryLeadResults } from "./result-quality";
 import type {
   MarketIntelligenceSearchInput,
   MarketIntelligenceSearchResponse,
@@ -42,20 +43,45 @@ export const runMarketIntelligenceSearch = async (
   const maxSources = Math.max(1, Math.min(input.maxSources || DEFAULT_MAX_SOURCES, 8));
   const maxResultsPerSource = Math.max(3, Math.min(input.maxResultsPerSource || DEFAULT_RESULTS_PER_SOURCE, 25));
 
-  const recommendedSources = await recommendSources(parsedQuery, maxSources);
+  const selectionPlan = await planSourceSelection(parsedQuery, maxSources);
+  const recommendedSources = selectionPlan.selected;
 
-  const executionResults = await Promise.all(
-    recommendedSources.map((source) => executeSourceWithFallback(source.source_id, parsedQuery, maxResultsPerSource))
+  let executionResults = await Promise.all(
+    recommendedSources.map((source) =>
+      executeSourceWithFallback(source.source_id, parsedQuery, maxResultsPerSource, {
+        allowAutomatedIndexFallback: false
+      })
+    )
   );
 
-  const mergedResults = mergeDedupedResults(
+  let mergedResults = mergeDedupedResults(
     executionResults.map((item) => item.result),
     parsedQuery.product
   );
+  let quality = filterPrimaryLeadResults(mergedResults);
 
-  const enrichedResults = await enrichResultsWithAi(mergedResults, parsedQuery);
+  if (quality.kept.length === 0 && recommendedSources.length > 0) {
+    const fallbackSource = recommendedSources[0];
+    const fallbackExecution = await executeSourceWithFallback(fallbackSource.source_id, parsedQuery, maxResultsPerSource, {
+      allowAutomatedIndexFallback: true
+    });
+    executionResults = executionResults.map((item) =>
+      item.result.sourceId === fallbackExecution.result.sourceId ? fallbackExecution : item
+    );
+    mergedResults = mergeDedupedResults(
+      executionResults.map((item) => item.result),
+      parsedQuery.product
+    );
+    quality = filterPrimaryLeadResults(mergedResults);
+  }
+
+  const enrichedResults = await enrichResultsWithAi(quality.kept, parsedQuery);
   const diagnostics = buildSourceDiagnostics(executionResults, recommendedSources);
   const warnings = diagnostics.flatMap((item) => item.warnings.map((warning) => `${item.source_name}: ${warning}`));
+
+  if (quality.rejected.length > 0) {
+    warnings.push(`Excluded ${quality.rejected.length} media/news-like records from primary lead discovery.`);
+  }
 
   diagnostics.forEach((diagnostic) => {
     if (diagnostic.blocked) {
@@ -74,6 +100,8 @@ export const runMarketIntelligenceSearch = async (
   return {
     parsed_query: parsedQuery,
     recommended_sources: recommendedSources,
+    skipped_sources: selectionPlan.skipped,
+    source_registry: selectionPlan.source_registry,
     executed_sources: executionResults.map((item) => item.result.sourceName),
     source_diagnostics: diagnostics,
     warnings,

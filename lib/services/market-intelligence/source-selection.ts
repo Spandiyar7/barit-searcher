@@ -9,7 +9,8 @@ import type {
   SourceDescriptor,
   SourceGroup,
   SourceId,
-  SourceRecommendation
+  SourceRecommendation,
+  SourceSkipDiagnostic
 } from "./types";
 
 const MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
@@ -78,6 +79,38 @@ const FOOD_AGRICULTURE_BUSINESS_LISTING_SOURCE_IDS = new Set<SourceId>([
   "exporthub"
 ]);
 const FOOD_AGRICULTURE_DIRECTORY_FALLBACK_SOURCE_IDS = new Set<SourceId>(["kompass", "europages"]);
+
+const CATEGORY_PRIORITY_SOURCE_IDS: Record<ProductCategory, SourceId[]> = {
+  food_agriculture: [
+    "direct_websites",
+    "kompass",
+    "europages",
+    "agroserver",
+    "flagma",
+    "agro_kg",
+    "tajagro",
+    "gieldarolna",
+    "satu_kz",
+    "all_biz"
+  ],
+  petrochemicals: ["petrochemz", "chemnet", "toocle", "globy", "global_trade_plaza", "ec21", "exporthub"],
+  fuels: ["petrochemz", "globy", "argus_media", "spglobal_platts", "volza", "seair"],
+  lng_lpg: ["petrochemz", "globy", "argus_media", "spglobal_platts", "volza"],
+  polymers: ["plastic4trade", "petrochemz", "toocle", "ec21", "globy", "exporthub"],
+  plastics: ["plastic4trade", "petrochemz", "toocle", "ec21", "globy", "exporthub"],
+  chemicals: ["chemnet", "petrochemz", "toocle", "ec21", "exporthub", "globy"],
+  fertilizers: ["chemnet", "globy", "ec21", "exporthub", "direct_websites", "volza"],
+  industrial_minerals: ["asianmetal", "metal_com", "volza", "kompass", "direct_websites", "global_trade_plaza"]
+};
+
+const CATEGORY_DEPRIORITIZED_SOURCE_IDS: Partial<Record<ProductCategory, SourceId[]>> = {
+  food_agriculture: ["chemnet", "petrochemz", "plastic4trade"],
+  petrochemicals: ["gieldarolna", "agroserver", "agro_kg", "tajagro", "gratka", "optlist"],
+  fuels: ["gieldarolna", "agroserver", "agro_kg", "tajagro", "gratka", "optlist"],
+  polymers: ["gieldarolna", "agroserver", "agro_kg", "tajagro"],
+  plastics: ["gieldarolna", "agroserver", "agro_kg", "tajagro"],
+  industrial_minerals: ["agro_kg", "tajagro", "optlist", "gratka"]
+};
 
 const QUERY_SOURCE_BOOST_RULES: Array<{
   pattern: RegExp;
@@ -414,6 +447,18 @@ const scoreSource = (source: SourceDescriptor, parsedQuery: ParsedQuery, perf?: 
       score -= 18;
       reasons.push("Weak category fit");
     }
+
+    const categoryPriority = CATEGORY_PRIORITY_SOURCE_IDS[parsedQuery.product_category] || [];
+    if (categoryPriority.includes(source.id)) {
+      score += 22;
+      reasons.push("Category priority source");
+    }
+
+    const categoryDeprioritized = new Set(CATEGORY_DEPRIORITIZED_SOURCE_IDS[parsedQuery.product_category] || []);
+    if (categoryDeprioritized.has(source.id)) {
+      score -= 34;
+      reasons.push("Category deprioritized source");
+    }
   }
 
   if (foodAgricultureQuery) {
@@ -566,6 +611,21 @@ const scoreSource = (source: SourceDescriptor, parsedQuery: ParsedQuery, perf?: 
     reasons.push("Browser execution");
   }
 
+  if (source.contactRichness === "high") {
+    score += 14;
+    reasons.push("Contact-rich source");
+  } else if (source.contactRichness === "medium") {
+    score += 6;
+  } else {
+    score -= 8;
+    reasons.push("Low contact richness");
+  }
+
+  if (source.resultType === "analytics" && (parsedQuery.intent === "buyers" || parsedQuery.intent === "suppliers")) {
+    score -= 4;
+    reasons.push("Analytics source for signal context");
+  }
+
   if (source.browserCapable && source.executionMode === "fetch") {
     score += 4;
     reasons.push("Browser fallback available");
@@ -616,8 +676,12 @@ const scoreSource = (source: SourceDescriptor, parsedQuery: ParsedQuery, perf?: 
     source_id: source.id,
     source_name: source.name,
     group: source.group,
+    approved: source.approved,
     priority_tier: source.priorityTier,
     purpose: source.purpose,
+    result_type: source.resultType,
+    regions: source.regions,
+    contact_richness: source.contactRichness,
     product_category_fit: source.productCategoryFit,
     industry_specialization: source.industrySpecialization,
     score,
@@ -629,16 +693,92 @@ const scoreSource = (source: SourceDescriptor, parsedQuery: ParsedQuery, perf?: 
   } satisfies SourceRecommendation;
 };
 
-export const recommendSources = async (
+const APPROVED_SOURCE_CATALOG = SOURCE_CATALOG.filter((source) => source.approved);
+
+const buildSkippedSourceDiagnostics = (
+  parsedQuery: ParsedQuery,
+  selected: SourceRecommendation[]
+): SourceSkipDiagnostic[] => {
+  const selectedIds = new Set(selected.map((item) => item.source_id));
+  const specializedQuery = isSpecializedCommodityQuery(parsedQuery);
+  const foodAgricultureQuery = parsedQuery.product_category === "food_agriculture";
+
+  return APPROVED_SOURCE_CATALOG.filter((source) => !selectedIds.has(source.id)).map((source) => {
+    if (!source.engineAvailable) {
+      return {
+        source_id: source.id,
+        source_name: source.name,
+        reason_code: "no_adapter",
+        reason: "Approved source without native adapter in current rollout."
+      };
+    }
+
+    if (parsedQuery.product_category && !source.productCategoryFit.includes(parsedQuery.product_category)) {
+      return {
+        source_id: source.id,
+        source_name: source.name,
+        reason_code: "category_mismatch",
+        reason: `Weak fit for detected category ${parsedQuery.product_category}.`
+      };
+    }
+
+    if (!source.intents.includes(parsedQuery.intent)) {
+      return {
+        source_id: source.id,
+        source_name: source.name,
+        reason_code: "intent_mismatch",
+        reason: `Intent ${parsedQuery.intent} is not primary for this source.`
+      };
+    }
+
+    if ((specializedQuery || foodAgricultureQuery) && source.priorityTier === 3) {
+      return {
+        source_id: source.id,
+        source_name: source.name,
+        reason_code: "tier_fallback",
+        reason: "Tier 3 fallback source kept in reserve."
+      };
+    }
+
+    return {
+      source_id: source.id,
+      source_name: source.name,
+      reason_code: "lower_ranked",
+      reason: "Lower ranking than selected approved sources."
+    };
+  });
+};
+
+export const buildSourceRegistryView = (parsedQuery: ParsedQuery, selected: SourceRecommendation[]) => {
+  const skipped = buildSkippedSourceDiagnostics(parsedQuery, selected);
+  return {
+    skipped,
+    source_registry: {
+      total_approved: APPROVED_SOURCE_CATALOG.length,
+      selected_count: selected.length,
+      skipped_count: skipped.length
+    }
+  };
+};
+
+export const planSourceSelection = async (
   parsedQuery: ParsedQuery,
   maxSources = 5
-): Promise<SourceRecommendation[]> => {
+): Promise<{
+  selected: SourceRecommendation[];
+  skipped: SourceSkipDiagnostic[];
+  source_registry: {
+    total_approved: number;
+    selected_count: number;
+    skipped_count: number;
+  };
+}> => {
   const [performanceMap, runPerformanceMap] = await Promise.all([
     loadPerformanceMap(parsedQuery.intent),
     getRankingRunPerformanceMap(parsedQuery.intent)
   ]);
 
-  const scored = SOURCE_CATALOG.map((source) =>
+  const scored = APPROVED_SOURCE_CATALOG.map((source) =>
     scoreSource(source, parsedQuery, performanceMap.get(source.id), runPerformanceMap.get(source.id))
   ).sort((a, b) => b.score - a.score);
 
@@ -719,5 +859,18 @@ export const recommendSources = async (
     fallback.forEach(tryPush);
   }
 
-  return selected;
+  const registry = buildSourceRegistryView(parsedQuery, selected);
+  return {
+    selected,
+    skipped: registry.skipped,
+    source_registry: registry.source_registry
+  };
+};
+
+export const recommendSources = async (
+  parsedQuery: ParsedQuery,
+  maxSources = 5
+): Promise<SourceRecommendation[]> => {
+  const selection = await planSourceSelection(parsedQuery, maxSources);
+  return selection.selected;
 };

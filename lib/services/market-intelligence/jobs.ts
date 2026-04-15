@@ -6,9 +6,10 @@ import { enrichResultsWithAi } from "./ai-analysis";
 import { executeSourceWithFallback } from "./execution";
 import { importMarketIntelligenceLead } from "./import";
 import { understandMarketQuery } from "./query-understanding";
-import { recommendSources } from "./source-selection";
+import { buildSourceRegistryView, planSourceSelection } from "./source-selection";
 import { withOriginMeta } from "./source-origin";
 import { SOURCE_BY_ID } from "./source-catalog";
+import { filterPrimaryLeadResults } from "./result-quality";
 import {
   findMatchingLeadBySignals,
   findMatchingRawLeadBySignals,
@@ -576,6 +577,7 @@ const getJobSnapshotOrThrow = async (jobId: string): Promise<MarketIntelligenceJ
   if (!parsedQuery) throw new Error("Search job parsed query is invalid");
 
   const recommendedSources = parseJson<SourceRecommendation[]>(job.recommendedSources, []);
+  const registryView = buildSourceRegistryView(parsedQuery, recommendedSources);
   const recommendationMap = new Map(recommendedSources.map((item) => [item.source_id, item]));
   const runs = job.sourceRuns.map((run) => buildSourceRunSnapshot(run));
   const diagnostics = job.sourceRuns.map((run) => mapRunDiagnostics(run, recommendationMap.get(run.sourceId as SourceId)));
@@ -592,6 +594,8 @@ const getJobSnapshotOrThrow = async (jobId: string): Promise<MarketIntelligenceJ
     ),
     parsed_query: parsedQuery,
     recommended_sources: recommendedSources,
+    skipped_sources: registryView.skipped,
+    source_registry: registryView.source_registry,
     source_diagnostics: diagnostics,
     source_runs: runs,
     warnings,
@@ -704,8 +708,20 @@ export const processSearchJob = async (jobId: string) => {
         }
       });
 
-      const execution = await executeSourceWithFallback(run.sourceId as SourceId, parsedQuery, maxResultsPerSource);
-      const aiEnriched = await enrichResultsWithAi(execution.result.results, parsedQuery);
+      const execution = await executeSourceWithFallback(run.sourceId as SourceId, parsedQuery, maxResultsPerSource, {
+        allowAutomatedIndexFallback: false
+      });
+      const quality = filterPrimaryLeadResults(execution.result.results);
+      if (quality.rejected.length > 0) {
+        execution.result.warnings.push(
+          `Excluded ${quality.rejected.length} media/news-like records from primary lead discovery.`
+        );
+      }
+      execution.result.results = quality.kept;
+      execution.result.extracted_results = quality.kept.length;
+      execution.result.parse_status =
+        quality.kept.length > 0 ? "success" : execution.result.parse_status === "skipped" ? "skipped" : "empty";
+      const aiEnriched = await enrichResultsWithAi(quality.kept, parsedQuery);
       const resultPayloads: JobResultItem[] = [];
 
       let runImported = 0;
@@ -888,7 +904,8 @@ export const createSearchJob = async (input: CreateSearchJobInput): Promise<Crea
   const parsedQuery = await understandMarketQuery(input);
   const maxSources = Math.max(1, Math.min(input.maxSources || DEFAULT_MAX_SOURCES, 8));
   const maxResultsPerSource = Math.max(3, Math.min(input.maxResultsPerSource || DEFAULT_RESULTS_PER_SOURCE, 25));
-  const recommendedSources = await recommendSources(parsedQuery, maxSources);
+  const selectionPlan = await planSourceSelection(parsedQuery, maxSources);
+  const recommendedSources = selectionPlan.selected;
   const selectedSources = recommendedSources.map((source) => source.source_id);
 
   const job = await prisma.searchJob.create({
