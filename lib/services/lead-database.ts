@@ -22,6 +22,8 @@ export type WhyMatchedCode =
 export type LeadDatabaseItem = {
   id: string;
   leadId: string | null;
+  companyId: string | null;
+  contactId: string | null;
   rawRecordId: string | null;
   promotedToLeadId: string | null;
   company: string;
@@ -494,6 +496,8 @@ const toLeadDatabaseItemFromRaw = (input: {
   return {
     id: input.raw.id,
     leadId: null,
+    companyId: null,
+    contactId: null,
     rawRecordId: input.raw.id,
     promotedToLeadId: input.raw.leadId,
     company: input.result.company || "Unknown company",
@@ -646,6 +650,8 @@ const toLeadDatabaseItem = (input: {
   return {
     id: input.lead.id,
     leadId: input.lead.id,
+    companyId: input.lead.companyId || null,
+    contactId: contact?.id || null,
     rawRecordId: rawLink?.id || null,
     promotedToLeadId: rawLink ? input.lead.id : null,
     company: input.lead.company?.name || input.result?.company || "Unknown company",

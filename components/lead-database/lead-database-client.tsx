@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ExternalLink } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -16,6 +16,8 @@ import type { Locale } from "@/lib/i18n/config";
 type LeadDatabaseItem = {
   id: string;
   leadId: string | null;
+  companyId: string | null;
+  contactId: string | null;
   rawRecordId: string | null;
   promotedToLeadId: string | null;
   company: string;
@@ -111,18 +113,6 @@ const confidenceVariant = (score: number) => {
   return "default" as const;
 };
 
-const confidenceTierVariant = (tier: LeadDatabaseItem["confidenceTier"]) => {
-  if (tier === "high") return "success" as const;
-  if (tier === "medium") return "warning" as const;
-  return "default" as const;
-};
-
-const reviewStatusVariant = (status: LeadDatabaseItem["reviewStatus"]) => {
-  if (status === "IMPORTED" || status === "READY") return "success" as const;
-  if (status === "PENDING_REVIEW") return "warning" as const;
-  return "default" as const;
-};
-
 const whyKeyMap: Record<string, string> = {
   roleRelevance: "leadDatabase.why.roleRelevance",
   contactCompleteness: "leadDatabase.why.contactCompleteness",
@@ -161,31 +151,52 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
   const [hasEmailFilter, setHasEmailFilter] = useState("");
   const [hasPhoneFilter, setHasPhoneFilter] = useState("");
   const [hasVolumeFilter, setHasVolumeFilter] = useState("");
-  const [contactActionState, setContactActionState] = useState<Record<string, string>>({});
+  const [rowActionState, setRowActionState] = useState<Record<string, string>>({});
   const [contactLoadingId, setContactLoadingId] = useState<string | null>(null);
+  const [assignLoadingId, setAssignLoadingId] = useState<string | null>(null);
+  const [promoteLoadingId, setPromoteLoadingId] = useState<string | null>(null);
+
+  const toOperatorSafeMessage = useCallback(
+    (value: unknown, fallback: string) => {
+      const message = value instanceof Error ? value.message : fallback;
+      if (!message) return fallback;
+      if (
+        /(403|404|429|5\d\d|chunk|diagnostic|registry|adapter|blocked|captcha|parser|source run|trace|middleware|network|timeout)/i.test(
+          message
+        )
+      ) {
+        return `${t("leadDatabase.limitedResults")} ${t("leadDatabase.trySpecific")}`;
+      }
+      return message;
+    },
+    [t]
+  );
+
+  const loadDatabase = useCallback(async () => {
+    const response = await fetch("/api/lead-database");
+    const json = (await response.json().catch(() => ({}))) as ApiPayload<LeadDatabaseListResponse>;
+    if (!response.ok || !json.data) throw new Error(json.error || t("leadDatabase.loadError"));
+    return json.data;
+  }, [t]);
 
   useEffect(() => {
     let cancelled = false;
 
-    const loadDatabase = async () => {
-      try {
-        const response = await fetch("/api/lead-database");
-        const json = (await response.json().catch(() => ({}))) as ApiPayload<LeadDatabaseListResponse>;
-        if (!response.ok || !json.data) throw new Error(json.error || t("leadDatabase.loadError"));
-        if (!cancelled) {
-          setDatabase(json.data);
-          setError(null);
-        }
-      } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : t("leadDatabase.loadError"));
-      }
-    };
+    void loadDatabase()
+      .then((data) => {
+        if (cancelled) return;
+        setDatabase(data);
+        setError(null);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(toOperatorSafeMessage(err, t("leadDatabase.loadError")));
+      });
 
-    void loadDatabase();
     return () => {
       cancelled = true;
     };
-  }, [t]);
+  }, [loadDatabase, t, toOperatorSafeMessage]);
 
   useEffect(() => {
     let cancelled = false;
@@ -230,7 +241,7 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
         }
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : t("leadDatabase.snapshotError"));
+          setError(toOperatorSafeMessage(err, t("leadDatabase.snapshotError")));
           timer = setTimeout(() => void poll(), 4000);
         }
       } finally {
@@ -243,7 +254,7 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [jobId, t]);
+  }, [jobId, t, toOperatorSafeMessage]);
 
   const runPipeline = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -275,29 +286,32 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
         setHistory(historyJson.data);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("leadDatabase.createError"));
+      setError(toOperatorSafeMessage(err, t("leadDatabase.createError")));
     } finally {
       setLoading(false);
     }
   };
 
-  const findContact = async (leadId: string) => {
+  const findContact = async (item: LeadDatabaseItem) => {
+    if (!item.leadId) return;
     try {
-      setContactLoadingId(leadId);
-      const response = await fetch(`/api/leads/${leadId}/find-contact`, {
+      setContactLoadingId(item.id);
+      const response = await fetch(`/api/leads/${item.leadId}/find-contact`, {
         method: "POST"
       });
       const json = (await response.json().catch(() => ({}))) as ApiPayload<{ leadId: string }>;
       if (!response.ok) throw new Error(json.error || t("leadDatabase.findContactError"));
 
-      setContactActionState((prev) => ({
+      setRowActionState((prev) => ({
         ...prev,
-        [leadId]: t("leadDatabase.findContactDone")
+        [item.id]: t("leadDatabase.findContactDone")
       }));
+      const refreshed = await loadDatabase();
+      setDatabase(refreshed);
     } catch (error) {
-      setContactActionState((prev) => ({
+      setRowActionState((prev) => ({
         ...prev,
-        [leadId]: error instanceof Error ? error.message : t("leadDatabase.findContactError")
+        [item.id]: toOperatorSafeMessage(error, t("leadDatabase.findContactError"))
       }));
     } finally {
       setContactLoadingId(null);
@@ -328,7 +342,86 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
         setHistory(historyJson.data);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("leadDatabase.rerunError"));
+      setError(toOperatorSafeMessage(err, t("leadDatabase.rerunError")));
+    }
+  };
+
+  const onAssignManager = async (item: LeadDatabaseItem) => {
+    if (!item.leadId) return;
+    const manager = window.prompt(t("leadDatabase.managerPrompt"));
+    if (!manager || manager.trim().length < 2) return;
+
+    try {
+      setAssignLoadingId(item.id);
+      const response = await fetch("/api/lead-discovery/actions/assign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          leadId: item.leadId,
+          manager: manager.trim()
+        })
+      });
+      const json = (await response.json().catch(() => ({}))) as ApiPayload<Record<string, unknown>>;
+      if (!response.ok) throw new Error(json.error || t("leadDatabase.actionFailed"));
+
+      setRowActionState((prev) => ({
+        ...prev,
+        [item.id]: t("leadDatabase.assigned")
+      }));
+    } catch (err) {
+      setRowActionState((prev) => ({
+        ...prev,
+        [item.id]: toOperatorSafeMessage(err, t("leadDatabase.actionFailed"))
+      }));
+    } finally {
+      setAssignLoadingId(null);
+    }
+  };
+
+  const onConvertToLead = async (item: LeadDatabaseItem) => {
+    if (!item.rawRecordId || item.leadId) return;
+    try {
+      setPromoteLoadingId(item.id);
+      const response = await fetch(`/api/raw-market-leads/${item.rawRecordId}/promote`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ saveCompany: true })
+      });
+      const json = (await response.json().catch(() => ({}))) as ApiPayload<{ leadId?: string }>;
+      if (!response.ok || !json.data?.leadId) throw new Error(json.error || t("leadDatabase.convertError"));
+
+      setRowActionState((prev) => ({
+        ...prev,
+        [item.id]: t("leadDatabase.converted")
+      }));
+
+      const promotedLeadId = json.data.leadId;
+      setSnapshot((prev) =>
+        prev
+          ? {
+              ...prev,
+              leads: prev.leads.map((lead) =>
+                lead.id === item.id
+                  ? {
+                      ...lead,
+                      leadId: promotedLeadId,
+                      promotedToLeadId: promotedLeadId,
+                      sourceRecordType: "lead"
+                    }
+                  : lead
+              )
+            }
+          : prev
+      );
+      const refreshed = await loadDatabase();
+      setDatabase(refreshed);
+    } catch (err) {
+      setRowActionState((prev) => ({
+        ...prev,
+        [item.id]: toOperatorSafeMessage(err, t("leadDatabase.convertError"))
+      }));
+    } finally {
+      setPromoteLoadingId(null);
     }
   };
 
@@ -444,8 +537,7 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
                   <p className="text-xs text-slate-500">
                     {new Date(item.created_at).toLocaleString(locale === "ru" ? "ru-RU" : "en-US")} • {item.total_results}{" "}
                     {t("leadDatabase.historyResults")} • {item.imported_leads} {t("leadDatabase.historyImported")} •{" "}
-                    {item.saved_raw_leads} {t("leadDatabase.historyRaw")} • {item.source_count}{" "}
-                    {t("leadDatabase.historySources")} • {item.blocked_sources} {t("leadDatabase.historyBlocked")}
+                    {item.source_count} {t("leadDatabase.historySources")}
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -506,7 +598,6 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
             <option value="">{t("leadDatabase.tierAny")}</option>
             <option value="ready">{t("leadDatabase.tier.ready")}</option>
             <option value="actionable">{t("leadDatabase.tier.actionable")}</option>
-            <option value="signal">{t("leadDatabase.tier.signal")}</option>
           </Select>
           <Input placeholder={t("leadDatabase.country")} value={countryFilter} onChange={(e) => setCountryFilter(e.target.value)} />
           <Select value={sourceFilter} onChange={(e) => setSourceFilter(e.target.value)}>
@@ -548,7 +639,9 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
         </div>
       </Card>
 
-      {error ? <p className="text-sm text-rose-600">{error}</p> : null}
+      {error ? (
+        <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">{error}</p>
+      ) : null}
 
       {filteredItems.length === 0 ? (
         <EmptyState title={t("leadDatabase.emptyTitle")} description={t("leadDatabase.emptyDescription")} />
@@ -558,13 +651,7 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
             <THead>
               <TR>
                 <TH>{t("leadDatabase.company")}</TH>
-                <TH>{t("leadDatabase.savedFromSearch")}</TH>
-                <TH>{t("leadDatabase.origin")}</TH>
                 <TH>{t("leadDatabase.tier")}</TH>
-                <TH>{t("leadDatabase.confidenceTier")}</TH>
-                <TH>{t("leadDatabase.reviewStatus")}</TH>
-                <TH>{t("leadDatabase.rawRecordId")}</TH>
-                <TH>{t("leadDatabase.promotedLeadId")}</TH>
                 <TH>{t("leadDatabase.role")}</TH>
                 <TH>{t("leadDatabase.country")}</TH>
                 <TH>{t("leadDatabase.product")}</TH>
@@ -586,60 +673,49 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
                     <div className="space-y-1">
                       <p className="font-semibold text-slate-900">{item.company}</p>
                       {item.leadId ? (
-                        <Link href={`/leads/${item.leadId}`} className="text-xs text-primary hover:underline">
-                          {t("leadDatabase.openLead")}
-                        </Link>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <Link href={`/leads/${item.leadId}`} className="text-xs text-primary hover:underline">
+                            {t("leadDatabase.openLead")}
+                          </Link>
+                          {item.companyId ? (
+                            <Link href={`/companies/${item.companyId}`} className="text-xs text-primary hover:underline">
+                              {t("leadDatabase.openCompany")}
+                            </Link>
+                          ) : null}
+                          {item.contactId ? (
+                            <Link href={`/contacts/${item.contactId}`} className="text-xs text-primary hover:underline">
+                              {t("leadDatabase.openContact")}
+                            </Link>
+                          ) : null}
+                        </div>
                       ) : (
                         <span className="text-xs text-slate-500">{t("leadDatabase.pendingReview")}</span>
                       )}
                     </div>
                   </TD>
                   <TD>
-                    <Badge variant={item.savedFromSearch ? "success" : "default"}>
-                      {item.savedFromSearch ? t("leadDatabase.savedFromSearchYes") : t("leadDatabase.savedFromSearchNo")}
+                    <Badge variant={item.tier === "ready" ? "success" : item.tier === "actionable" ? "warning" : "default"}>
+                      {t(`leadDatabase.tier.${item.tier}`)}
                     </Badge>
-                  </TD>
-                  <TD>
-                    <div className="space-y-1">
+                    {item.savedFromSearch ? (
+                      <p className="mt-1 text-[11px] text-slate-500">{t("leadDatabase.savedFromSearchYes")}</p>
+                    ) : null}
+                    {item.reviewStatus === "PENDING_REVIEW" ? (
+                      <p className="mt-1 text-[11px] text-amber-700">{t("leadDatabase.pendingReview")}</p>
+                    ) : null}
+                    {item.lowConfidence ? (
+                      <p className="mt-1 text-[11px] text-slate-500">{t("leadDatabase.lowConfidenceHidden")}</p>
+                    ) : null}
+                    <div className="mt-1 space-x-1">
                       <Badge variant="default">{t(`sourceKind.${item.sourceKind}`)}</Badge>
                       <Badge variant="default">{t(`importMode.${item.importMode}`)}</Badge>
                     </div>
                   </TD>
                   <TD>
-                    <Badge variant={item.tier === "ready" ? "success" : item.tier === "actionable" ? "warning" : "default"}>
-                      {t(`leadDatabase.tier.${item.tier}`)}
-                    </Badge>
-                  </TD>
-                  <TD>
-                    <Badge variant={confidenceTierVariant(item.confidenceTier)}>
-                      {t(`leadDatabase.confidenceTier.${item.confidenceTier}`)}
-                    </Badge>
-                  </TD>
-                  <TD>
-                    <Badge variant={reviewStatusVariant(item.reviewStatus)}>
-                      {t(`leadDatabase.reviewStatus.${item.reviewStatus}`)}
-                    </Badge>
-                  </TD>
-                  <TD>
-                    {item.rawRecordId ? (
-                      <code className="block max-w-[160px] truncate text-xs text-slate-600" title={item.rawRecordId}>
-                        {item.rawRecordId}
-                      </code>
-                    ) : (
-                      <span className="text-xs text-slate-500">{t("common.noData")}</span>
-                    )}
-                  </TD>
-                  <TD>
-                    {item.promotedToLeadId ? (
-                      <code className="block max-w-[160px] truncate text-xs text-slate-600" title={item.promotedToLeadId}>
-                        {item.promotedToLeadId}
-                      </code>
-                    ) : (
-                      <span className="text-xs text-slate-500">{t("common.noData")}</span>
-                    )}
-                  </TD>
-                  <TD>
                     <Badge variant={roleVariant(item.role)}>{t(`leadDatabase.role.${item.role}`)}</Badge>
+                    {item.sourceRecordType === "raw" ? (
+                      <p className="mt-1 text-[11px] text-slate-500">{t("leadDatabase.pendingImport")}</p>
+                    ) : null}
                   </TD>
                   <TD>{item.country || t("common.noData")}</TD>
                   <TD>{item.product || t("common.noData")}</TD>
@@ -696,22 +772,40 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
                   </TD>
                   <TD>
                     <div className="space-y-1">
-                      <Button
-                        type="button"
-                        variant="secondary"
-                        className="h-8 px-3 text-xs"
-                        disabled={!item.leadId || contactLoadingId === item.leadId}
-                        onClick={() => (item.leadId ? void findContact(item.leadId) : undefined)}
-                      >
-                        {!item.leadId
-                          ? t("leadDatabase.notAvailable")
-                          : contactLoadingId === item.leadId
-                            ? t("leadDatabase.findingContact")
-                            : t("leadDatabase.findContact")}
-                      </Button>
-                      {item.leadId && contactActionState[item.leadId] ? (
-                        <p className="max-w-[180px] text-[11px] text-slate-500">{contactActionState[item.leadId]}</p>
+                      {!item.leadId && item.rawRecordId ? (
+                        <Button
+                          type="button"
+                          variant="primary"
+                          className="h-8 px-3 text-xs"
+                          disabled={promoteLoadingId === item.id}
+                          onClick={() => void onConvertToLead(item)}
+                        >
+                          {promoteLoadingId === item.id ? t("leadDatabase.converting") : t("leadDatabase.convertToLead")}
+                        </Button>
                       ) : null}
+                      {item.leadId ? (
+                        <Button
+                          type="button"
+                          variant="secondary"
+                          className="h-8 px-3 text-xs"
+                          disabled={contactLoadingId === item.id}
+                          onClick={() => void findContact(item)}
+                        >
+                          {contactLoadingId === item.id ? t("leadDatabase.findingContact") : t("leadDatabase.findContact")}
+                        </Button>
+                      ) : null}
+                      {item.leadId ? (
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          className="h-8 px-3 text-xs"
+                          disabled={assignLoadingId === item.id}
+                          onClick={() => void onAssignManager(item)}
+                        >
+                          {assignLoadingId === item.id ? t("leadDatabase.assigning") : t("leadDatabase.assignManager")}
+                        </Button>
+                      ) : null}
+                      {rowActionState[item.id] ? <p className="max-w-[180px] text-[11px] text-slate-500">{rowActionState[item.id]}</p> : null}
                     </div>
                   </TD>
                 </TR>

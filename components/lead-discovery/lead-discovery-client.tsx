@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { ExternalLink } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -101,6 +101,22 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
   const [actionState, setActionState] = useState<Record<string, string>>({});
   const [outreachByLeadId, setOutreachByLeadId] = useState<Record<string, string>>({});
 
+  const toOperatorSafeMessage = useCallback(
+    (value: unknown, fallback: string) => {
+      const message = value instanceof Error ? value.message : fallback;
+      if (!message) return fallback;
+      if (
+        /(403|404|429|5\d\d|chunk|diagnostic|registry|adapter|blocked|captcha|parser|source run|trace|middleware|network|timeout)/i.test(
+          message
+        )
+      ) {
+        return `${t("leadDiscovery.limitedResults")} ${t("leadDiscovery.trySpecific")}`;
+      }
+      return message;
+    },
+    [t]
+  );
+
   useEffect(() => {
     if (!jobId) return;
     let cancelled = false;
@@ -125,7 +141,7 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
         }
       } catch (err) {
         if (cancelled) return;
-        setError(err instanceof Error ? err.message : t("leadDiscovery.loadError"));
+        setError(toOperatorSafeMessage(err, t("leadDiscovery.loadError")));
         timer = setTimeout(() => void poll(), 4000);
       } finally {
         if (!cancelled) setPolling(false);
@@ -137,7 +153,7 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [jobId, t]);
+  }, [jobId, t, toOperatorSafeMessage]);
 
   const runDiscovery = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -166,7 +182,7 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
       setActionState({});
       setOutreachByLeadId({});
     } catch (err) {
-      setError(err instanceof Error ? err.message : t("leadDiscovery.createError"));
+      setError(toOperatorSafeMessage(err, t("leadDiscovery.createError")));
     } finally {
       setLoading(false);
     }
@@ -209,7 +225,7 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
       await postJson("/api/lead-discovery/actions/assign", { leadId: lead.leadId, manager: manager.trim() });
       setActionState((prev) => ({ ...prev, [lead.id]: t("leadDiscovery.assigned") }));
     } catch (err) {
-      setActionState((prev) => ({ ...prev, [lead.id]: err instanceof Error ? err.message : t("leadDiscovery.actionFailed") }));
+      setActionState((prev) => ({ ...prev, [lead.id]: toOperatorSafeMessage(err, t("leadDiscovery.actionFailed")) }));
     }
   };
 
@@ -227,7 +243,7 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
           : prev
       );
     } catch (err) {
-      setActionState((prev) => ({ ...prev, [lead.id]: err instanceof Error ? err.message : t("leadDiscovery.actionFailed") }));
+      setActionState((prev) => ({ ...prev, [lead.id]: toOperatorSafeMessage(err, t("leadDiscovery.actionFailed")) }));
     }
   };
 
@@ -238,7 +254,7 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
       const message = typeof data.message === "string" ? data.message : t("leadDiscovery.noOutreach");
       setOutreachByLeadId((prev) => ({ ...prev, [lead.id]: message }));
     } catch (err) {
-      setActionState((prev) => ({ ...prev, [lead.id]: err instanceof Error ? err.message : t("leadDiscovery.actionFailed") }));
+      setActionState((prev) => ({ ...prev, [lead.id]: toOperatorSafeMessage(err, t("leadDiscovery.actionFailed")) }));
     }
   };
 
@@ -259,7 +275,7 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
           : prev
       );
     } catch (err) {
-      setActionState((prev) => ({ ...prev, [lead.id]: err instanceof Error ? err.message : t("leadDiscovery.actionFailed") }));
+      setActionState((prev) => ({ ...prev, [lead.id]: toOperatorSafeMessage(err, t("leadDiscovery.actionFailed")) }));
     }
   };
 
@@ -288,7 +304,7 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
           : prev
       );
     } catch (err) {
-      setActionState((prev) => ({ ...prev, [lead.id]: err instanceof Error ? err.message : t("leadDiscovery.actionFailed") }));
+      setActionState((prev) => ({ ...prev, [lead.id]: toOperatorSafeMessage(err, t("leadDiscovery.actionFailed")) }));
     }
   };
 
@@ -319,7 +335,9 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
         <p className="mt-3 text-xs text-slate-500">{t("leadDiscovery.examples")}</p>
       </Card>
 
-      {error ? <p className="text-sm text-rose-600">{error}</p> : null}
+      {error ? (
+        <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">{error}</p>
+      ) : null}
 
       {snapshot ? (
         <div className="grid gap-4 md:grid-cols-4">
@@ -328,12 +346,12 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
             <p className="mt-3 text-2xl font-bold">{snapshot.totals.readyLeads}</p>
           </Card>
           <Card>
-            <CardTitle>{t("leadDiscovery.hiddenReview")}</CardTitle>
-            <p className="mt-3 text-2xl font-bold">{snapshot.totals.hiddenReview}</p>
+            <CardTitle>{t("leadDiscovery.imported")}</CardTitle>
+            <p className="mt-3 text-2xl font-bold">{snapshot.totals.imported}</p>
           </Card>
           <Card>
-            <CardTitle>{t("leadDiscovery.lowConfidence")}</CardTitle>
-            <p className="mt-3 text-2xl font-bold">{snapshot.totals.lowConfidence}</p>
+            <CardTitle>{t("leadDiscovery.duplicates")}</CardTitle>
+            <p className="mt-3 text-2xl font-bold">{snapshot.totals.duplicates}</p>
           </Card>
           <Card>
             <CardTitle>{t("leadDiscovery.status")}</CardTitle>

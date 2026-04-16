@@ -2,6 +2,7 @@ import { Card, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { PageHeader } from "@/components/ui/page-header";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
+import { requireAdminUiAccess } from "@/lib/auth/ui-role";
 import { fmtDate } from "@/lib/utils/format";
 import { getLocale } from "@/lib/i18n/get-locale";
 import { getTranslator } from "@/lib/i18n/dictionaries";
@@ -60,6 +61,7 @@ const BarList = <T extends { sourceName: string }>({
 };
 
 export default async function SourcePerformancePage() {
+  requireAdminUiAccess();
   const locale = getLocale();
   const t = getTranslator(locale);
   const data = await getSourcePerformanceDashboardData();

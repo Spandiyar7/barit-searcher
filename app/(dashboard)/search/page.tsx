@@ -3,6 +3,7 @@ import { PageHeader } from "@/components/ui/page-header";
 import { Card } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { SearchResults, type SearchPayload } from "@/components/search/search-results";
+import { requireAdminUiAccess } from "@/lib/auth/ui-role";
 import { getLocale } from "@/lib/i18n/get-locale";
 import { getTranslator } from "@/lib/i18n/dictionaries";
 
@@ -20,6 +21,7 @@ export default async function SearchPage({
 }: {
   searchParams: Record<string, string | string[] | undefined>;
 }) {
+  requireAdminUiAccess();
   const locale = getLocale();
   const t = getTranslator(locale);
   const query = typeof searchParams.q === "string" ? searchParams.q : "";

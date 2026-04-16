@@ -23,18 +23,18 @@ import { cn } from "@/lib/utils/cn";
 import { getTranslator } from "@/lib/i18n/dictionaries";
 import type { Locale } from "@/lib/i18n/config";
 
-const primaryNavItems = [
+const operatorNavItems = [
   { href: "/lead-database", key: "nav.leadDatabase", icon: Users },
   { href: "/lead-discovery", key: "nav.leadDiscovery", icon: Sparkles },
-  { href: "/trade-intelligence", key: "nav.tradeIntelligence", icon: Compass },
-  { href: "/dashboard", key: "nav.dashboard", icon: LayoutDashboard },
   { href: "/companies", key: "nav.companies", icon: Building2 },
   { href: "/contacts", key: "nav.contacts", icon: Contact2 },
   { href: "/leads", key: "nav.leads", icon: RadioTower },
   { href: "/deals", key: "nav.deals", icon: Handshake }
 ];
 
-const internalNavItems = [
+const adminNavItems = [
+  { href: "/dashboard", key: "nav.dashboard", icon: LayoutDashboard },
+  { href: "/trade-intelligence", key: "nav.tradeIntelligence", icon: Compass },
   { href: "/products", key: "nav.products", icon: Package },
   { href: "/search", key: "nav.searchLegacy", icon: Search },
   { href: "/market-search", key: "nav.marketSearchLegacy", icon: Globe2 },
@@ -44,7 +44,7 @@ const internalNavItems = [
   { href: "/intelligence", key: "nav.intelligence", icon: Lightbulb }
 ];
 
-export function Sidebar({ locale }: { locale: Locale }) {
+export function Sidebar({ locale, isAdmin }: { locale: Locale; isAdmin: boolean }) {
   const t = getTranslator(locale);
   const pathname = usePathname();
 
@@ -57,7 +57,7 @@ export function Sidebar({ locale }: { locale: Locale }) {
         </div>
       </div>
       <nav className="space-y-1 p-3">
-        {primaryNavItems.map((item) => {
+        {operatorNavItems.map((item) => {
           const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
           return (
             <Link
@@ -76,31 +76,33 @@ export function Sidebar({ locale }: { locale: Locale }) {
           );
         })}
 
-        <div className="pt-4">
-          <p className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
-            {t("nav.internalTools")}
-          </p>
-          <div className="space-y-1">
-            {internalNavItems.map((item) => {
-              const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={cn(
-                    "flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition",
-                    active
-                      ? "bg-primary text-primary-foreground shadow"
-                      : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
-                  )}
-                >
-                  <item.icon size={16} />
-                  {t(item.key)}
-                </Link>
-              );
-            })}
+        {isAdmin ? (
+          <div className="pt-4">
+            <p className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+              {t("nav.internalTools")}
+            </p>
+            <div className="space-y-1">
+              {adminNavItems.map((item) => {
+                const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    className={cn(
+                      "flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition",
+                      active
+                        ? "bg-primary text-primary-foreground shadow"
+                        : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                    )}
+                  >
+                    <item.icon size={16} />
+                    {t(item.key)}
+                  </Link>
+                );
+              })}
+            </div>
           </div>
-        </div>
+        ) : null}
       </nav>
     </aside>
   );

@@ -6,6 +6,7 @@ import { Card } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { Input } from "@/components/ui/input";
 import { Table, TBody, TD, TH, THead, TR } from "@/components/ui/table";
+import { requireAdminUiAccess } from "@/lib/auth/ui-role";
 import { fmtDate } from "@/lib/utils/format";
 import { getLocale } from "@/lib/i18n/get-locale";
 import { getTranslator } from "@/lib/i18n/dictionaries";
@@ -69,6 +70,7 @@ export default async function RawMarketLeadsPage({
 }: {
   searchParams: Record<string, string | string[] | undefined>;
 }) {
+  requireAdminUiAccess();
   const locale = getLocale();
   const t = getTranslator(locale);
 

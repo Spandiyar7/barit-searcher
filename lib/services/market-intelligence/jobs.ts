@@ -34,7 +34,6 @@ import type {
 
 const DEFAULT_MAX_SOURCES = 5;
 const DEFAULT_RESULTS_PER_SOURCE = 12;
-const HIGH_CONFIDENCE_THRESHOLD = 0.72;
 const MEDIUM_CONFIDENCE_THRESHOLD = 0.58;
 const MAX_WARNINGS = 60;
 const RUNNING_JOB_STALE_MS = 15 * 60 * 1000;
@@ -54,6 +53,16 @@ const normalizeSourceUrl = (value: string) => {
 };
 
 const clampScore = (value: number) => Math.max(0.01, Math.min(0.99, value));
+
+const normalizeCompanyName = (value: string | null | undefined) => (value || "").trim().replace(/\s+/g, " ");
+
+const hasValidCompanyName = (value: string | null | undefined) => {
+  const normalized = normalizeCompanyName(value).toLowerCase();
+  if (!normalized || normalized.length < 2) return false;
+  if (/^(unknown|n\/a|na|none|null|anonymous)(\s|$)/.test(normalized)) return false;
+  if (normalized.includes("not provided")) return false;
+  return true;
+};
 
 const computePersistenceRelevance = (result: JobResultItem) => {
   const base = result.relevance_score ?? result.confidence_score ?? 0;
@@ -416,32 +425,40 @@ const persistResult = async (input: {
     };
   }
 
-  if (relevance >= HIGH_CONFIDENCE_THRESHOLD) {
-    const imported = await importMarketIntelligenceLead({
-      result: {
-        ...normalizedPayload,
-        relevance_score: relevance,
-        source_url: normalizedSourceUrl
-      },
-      parsed_query: input.parsedQuery,
-      save_company: true,
-      with_ai: false
-    });
+  if (hasValidCompanyName(input.result.company)) {
+    try {
+      const imported = await importMarketIntelligenceLead({
+        result: {
+          ...normalizedPayload,
+          relevance_score: relevance,
+          source_url: normalizedSourceUrl
+        },
+        parsed_query: input.parsedQuery,
+        save_company: true,
+        with_ai: false
+      });
 
-    await prisma.rawMarketLead.update({
-      where: { id: stagedRawLead.id },
-      data: {
-        status: "IMPORTED",
-        leadId: imported.leadId
-      }
-    });
+      await prisma.rawMarketLead.update({
+        where: { id: stagedRawLead.id },
+        data: {
+          status: "IMPORTED",
+          leadId: imported.leadId
+        }
+      });
 
-    return {
-      persistence_status: imported.status === "imported" ? ("imported" as const) : ("duplicate" as const),
-      persistence_message: imported.message,
-      lead_id: imported.leadId,
-      raw_lead_id: stagedRawLead.id
-    };
+      return {
+        persistence_status: imported.status === "imported" ? ("imported" as const) : ("duplicate" as const),
+        persistence_message: imported.message,
+        lead_id: imported.leadId,
+        raw_lead_id: stagedRawLead.id
+      };
+    } catch {
+      return {
+        persistence_status: relevance >= MEDIUM_CONFIDENCE_THRESHOLD ? ("staged" as const) : ("logged" as const),
+        persistence_message: "Saved to raw market leads",
+        raw_lead_id: stagedRawLead.id
+      };
+    }
   }
 
   if (relevance >= MEDIUM_CONFIDENCE_THRESHOLD) {

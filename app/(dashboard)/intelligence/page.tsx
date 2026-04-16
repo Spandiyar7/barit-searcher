@@ -2,10 +2,12 @@ import { prisma } from "@/lib/db/prisma";
 import { PageHeader } from "@/components/ui/page-header";
 import { Card, CardTitle } from "@/components/ui/card";
 import { AILeadAnalyzer } from "@/components/leads/ai-lead-analyzer";
+import { requireAdminUiAccess } from "@/lib/auth/ui-role";
 import { getLocale } from "@/lib/i18n/get-locale";
 import { getTranslator } from "@/lib/i18n/dictionaries";
 
 export default async function IntelligencePage() {
+  requireAdminUiAccess();
   const locale = getLocale();
   const t = getTranslator(locale);
   const [topOrigins, topDestinations, topLeadProducts] = await Promise.all([

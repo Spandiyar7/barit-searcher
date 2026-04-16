@@ -23,7 +23,7 @@ const titleKeyMap: Record<string, string> = {
   intelligence: "nav.intelligence"
 };
 
-export function TopHeader({ locale }: { locale: Locale }) {
+export function TopHeader({ locale, isAdmin }: { locale: Locale; isAdmin: boolean }) {
   const t = getTranslator(locale);
   const pathname = usePathname();
   const firstSegment = pathname.split("/").filter(Boolean)[0] || "dashboard";
@@ -42,6 +42,11 @@ export function TopHeader({ locale }: { locale: Locale }) {
         <h1 className="text-lg font-semibold text-slate-900">{title}</h1>
       </div>
       <div className="flex items-center gap-2">
+        {isAdmin ? (
+          <span className="rounded-md border border-border px-2 py-1 text-xs font-semibold text-slate-500">
+            {t("nav.internalTools")}
+          </span>
+        ) : null}
         <LanguageSwitcher locale={locale} />
       </div>
     </header>

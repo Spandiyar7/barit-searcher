@@ -1,9 +1,11 @@
 import { PageHeader } from "@/components/ui/page-header";
 import { MarketIntelligenceClient } from "@/components/market-intelligence/market-intelligence-client";
+import { requireAdminUiAccess } from "@/lib/auth/ui-role";
 import { getLocale } from "@/lib/i18n/get-locale";
 import { getTranslator } from "@/lib/i18n/dictionaries";
 
 export default function MarketIntelligencePage() {
+  requireAdminUiAccess();
   const locale = getLocale();
   const t = getTranslator(locale);
 
