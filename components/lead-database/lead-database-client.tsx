@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ExternalLink } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -113,6 +113,8 @@ const confidenceVariant = (score: number) => {
   return "default" as const;
 };
 
+const isRunningStatus = (status: string | undefined) => status === "PENDING" || status === "RUNNING";
+
 const whyKeyMap: Record<string, string> = {
   roleRelevance: "leadDatabase.why.roleRelevance",
   contactCompleteness: "leadDatabase.why.contactCompleteness",
@@ -125,7 +127,7 @@ const whyKeyMap: Record<string, string> = {
 };
 
 export function LeadDatabaseClient({ locale }: { locale: Locale }) {
-  const t = getTranslator(locale);
+  const t = useMemo(() => getTranslator(locale), [locale]);
 
   const [query, setQuery] = useState("");
   const [country, setCountry] = useState("");
@@ -156,6 +158,11 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
   const [assignLoadingId, setAssignLoadingId] = useState<string | null>(null);
   const [promoteLoadingId, setPromoteLoadingId] = useState<string | null>(null);
 
+  const activeJobRef = useRef<string | null>(null);
+  const pollRequestRef = useRef(0);
+  const databaseRequestRef = useRef(0);
+  const historyRequestRef = useRef(0);
+
   const toOperatorSafeMessage = useCallback(
     (value: unknown, fallback: string) => {
       const message = value instanceof Error ? value.message : fallback;
@@ -172,89 +179,148 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
     [t]
   );
 
-  const loadDatabase = useCallback(async () => {
-    const response = await fetch("/api/lead-database");
-    const json = (await response.json().catch(() => ({}))) as ApiPayload<LeadDatabaseListResponse>;
-    if (!response.ok || !json.data) throw new Error(json.error || t("leadDatabase.loadError"));
-    return json.data;
-  }, [t]);
+  const loadDatabase = useCallback(
+    async (signal?: AbortSignal) => {
+      const response = await fetch("/api/lead-database", {
+        signal,
+        cache: "no-store"
+      });
+      const json = (await response.json().catch(() => ({}))) as ApiPayload<LeadDatabaseListResponse>;
+      if (!response.ok || !json.data) throw new Error(json.error || t("leadDatabase.loadError"));
+      return json.data;
+    },
+    [t]
+  );
+
+  const loadHistory = useCallback(
+    async (signal?: AbortSignal) => {
+      const response = await fetch("/api/lead-database/jobs?limit=30", {
+        signal,
+        cache: "no-store"
+      });
+      const json = (await response.json().catch(() => ({}))) as ApiPayload<SearchHistoryItem[]>;
+      if (!response.ok || !json.data) throw new Error(t("leadDatabase.historyLoadError"));
+      return json.data;
+    },
+    [t]
+  );
+
+  useEffect(() => {
+    activeJobRef.current = jobId;
+  }, [jobId]);
 
   useEffect(() => {
     let cancelled = false;
+    const requestId = ++databaseRequestRef.current;
+    const controller = new AbortController();
 
-    void loadDatabase()
+    void loadDatabase(controller.signal)
       .then((data) => {
-        if (cancelled) return;
+        if (cancelled || requestId !== databaseRequestRef.current) return;
         setDatabase(data);
         setError(null);
       })
       .catch((err) => {
-        if (cancelled) return;
+        if (controller.signal.aborted || cancelled || requestId !== databaseRequestRef.current) return;
         setError(toOperatorSafeMessage(err, t("leadDatabase.loadError")));
       });
 
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [loadDatabase, t, toOperatorSafeMessage]);
 
   useEffect(() => {
     let cancelled = false;
+    const requestId = ++historyRequestRef.current;
+    const controller = new AbortController();
 
-    const loadHistory = async () => {
-      try {
-        setHistoryLoading(true);
-        const response = await fetch("/api/lead-database/jobs?limit=30");
-        const json = (await response.json().catch(() => ({}))) as ApiPayload<SearchHistoryItem[]>;
-        if (!response.ok || !json.data) throw new Error(t("leadDatabase.historyLoadError"));
-        if (!cancelled) setHistory(json.data);
-      } catch {
-        if (!cancelled) setHistory([]);
-      } finally {
-        if (!cancelled) setHistoryLoading(false);
-      }
-    };
+    setHistoryLoading(true);
+    void loadHistory(controller.signal)
+      .then((data) => {
+        if (cancelled || requestId !== historyRequestRef.current) return;
+        setHistory(data);
+      })
+      .catch(() => {
+        if (controller.signal.aborted || cancelled || requestId !== historyRequestRef.current) return;
+        setHistory([]);
+      })
+      .finally(() => {
+        if (cancelled || requestId !== historyRequestRef.current) return;
+        setHistoryLoading(false);
+      });
 
-    void loadHistory();
     return () => {
       cancelled = true;
+      controller.abort();
     };
-  }, [t]);
+  }, [loadHistory]);
 
   useEffect(() => {
     if (!jobId) return;
+
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let controller: AbortController | null = null;
+    let retries = 0;
+    const expectedJobId = jobId;
 
     const poll = async () => {
+      if (cancelled || activeJobRef.current !== expectedJobId) return;
+
+      const requestId = ++pollRequestRef.current;
+      controller?.abort();
+      controller = new AbortController();
+
       try {
         setPolling(true);
-        const response = await fetch(`/api/lead-database/jobs/${jobId}`);
+        const response = await fetch(`/api/lead-database/jobs/${expectedJobId}`, {
+          signal: controller.signal,
+          cache: "no-store"
+        });
         const json = (await response.json().catch(() => ({}))) as ApiPayload<LeadDatabaseSnapshot>;
         if (!response.ok || !json.data) throw new Error(json.error || t("leadDatabase.snapshotError"));
-        if (cancelled) return;
+
+        if (cancelled || activeJobRef.current !== expectedJobId || requestId !== pollRequestRef.current) return;
+
         setSnapshot(json.data);
         setError(null);
 
-        if (json.data.job.status === "PENDING" || json.data.job.status === "RUNNING") {
+        if (isRunningStatus(json.data.job.status)) {
           timer = setTimeout(() => void poll(), 2500);
+          return;
+        }
+
+        setPolling(false);
+        const refreshed = await loadDatabase();
+        if (!cancelled && activeJobRef.current === expectedJobId) {
+          setDatabase(refreshed);
         }
       } catch (err) {
-        if (!cancelled) {
-          setError(toOperatorSafeMessage(err, t("leadDatabase.snapshotError")));
-          timer = setTimeout(() => void poll(), 4000);
+        if (controller.signal.aborted) return;
+        if (cancelled || activeJobRef.current !== expectedJobId || requestId !== pollRequestRef.current) return;
+
+        retries += 1;
+        setError(toOperatorSafeMessage(err, t("leadDatabase.snapshotError")));
+
+        if (retries < 3) {
+          timer = setTimeout(() => void poll(), 3500);
+        } else {
+          setPolling(false);
         }
-      } finally {
-        if (!cancelled) setPolling(false);
       }
     };
 
     void poll();
+
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      controller?.abort();
+      setPolling(false);
     };
-  }, [jobId, t, toOperatorSafeMessage]);
+  }, [jobId, loadDatabase, t, toOperatorSafeMessage]);
 
   const runPipeline = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -278,13 +344,27 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
       });
       const json = (await response.json().catch(() => ({}))) as ApiPayload<{ job_id: string }>;
       if (!response.ok || !json.data?.job_id) throw new Error(json.error || t("leadDatabase.createError"));
+
       setJobId(json.data.job_id);
       setSnapshot(null);
-      const historyResponse = await fetch("/api/lead-database/jobs?limit=30");
-      const historyJson = (await historyResponse.json().catch(() => ({}))) as ApiPayload<SearchHistoryItem[]>;
-      if (historyResponse.ok && historyJson.data) {
-        setHistory(historyJson.data);
-      }
+      setRowActionState({});
+
+      setRoleFilter("");
+      setTierFilter("");
+      setCountryFilter("");
+      setSourceFilter("");
+      setProductFilter("");
+      setHasContactFilter("");
+      setHasEmailFilter("");
+      setHasPhoneFilter("");
+      setHasVolumeFilter("");
+      setConfidenceFilter("60");
+
+      void loadHistory()
+        .then((refreshedHistory) => {
+          setHistory(refreshedHistory);
+        })
+        .catch(() => undefined);
     } catch (err) {
       setError(toOperatorSafeMessage(err, t("leadDatabase.createError")));
     } finally {
@@ -308,10 +388,10 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
       }));
       const refreshed = await loadDatabase();
       setDatabase(refreshed);
-    } catch (error) {
+    } catch (err) {
       setRowActionState((prev) => ({
         ...prev,
-        [item.id]: toOperatorSafeMessage(error, t("leadDatabase.findContactError"))
+        [item.id]: toOperatorSafeMessage(err, t("leadDatabase.findContactError"))
       }));
     } finally {
       setContactLoadingId(null);
@@ -336,11 +416,11 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
       setJobId(json.data.job_id);
       setSnapshot(null);
 
-      const historyResponse = await fetch("/api/lead-database/jobs?limit=30");
-      const historyJson = (await historyResponse.json().catch(() => ({}))) as ApiPayload<SearchHistoryItem[]>;
-      if (historyResponse.ok && historyJson.data) {
-        setHistory(historyJson.data);
-      }
+      void loadHistory()
+        .then((refreshedHistory) => {
+          setHistory(refreshedHistory);
+        })
+        .catch(() => undefined);
     } catch (err) {
       setError(toOperatorSafeMessage(err, t("leadDatabase.rerunError")));
     }
@@ -425,9 +505,23 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
     }
   };
 
+  const activeSnapshot = useMemo(() => {
+    if (!snapshot || !jobId) return null;
+    return snapshot.job.id === jobId ? snapshot : null;
+  }, [snapshot, jobId]);
+
+  const activeSnapshotRunning = isRunningStatus(activeSnapshot?.job.status);
+
   const items = useMemo(() => {
-    return snapshot?.leads || database?.leads || [];
-  }, [snapshot, database]);
+    if (activeSnapshot) {
+      if (activeSnapshot.leads.length > 0) return activeSnapshot.leads;
+      if (activeSnapshotRunning && (database?.leads?.length || 0) > 0) {
+        return database?.leads || [];
+      }
+      return activeSnapshot.leads;
+    }
+    return database?.leads || [];
+  }, [activeSnapshot, activeSnapshotRunning, database]);
 
   const filteredItems = useMemo(() => {
     const minConfidence = Number(confidenceFilter || "0");
@@ -467,23 +561,44 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
     return Array.from(new Set(items.map((item) => item.sourceName))).sort((a, b) => a.localeCompare(b));
   }, [items]);
 
-  const totals = snapshot
-    ? {
-        total: snapshot.totals.readyLeads + snapshot.totals.actionableLeads,
-        readyLeads: snapshot.totals.readyLeads,
-        actionableLeads: snapshot.totals.actionableLeads,
-        withContacts: snapshot.totals.withContacts,
-        withVolume: snapshot.totals.withVolume,
-        averageConfidence: snapshot.totals.averageConfidence
-      }
-    : {
-        total: database?.totals.total || 0,
-        readyLeads: database?.totals.readyLeads || 0,
-        actionableLeads: database?.totals.actionableLeads || 0,
-        withContacts: database?.totals.withContacts || 0,
-        withVolume: database?.totals.withVolume || 0,
-        averageConfidence: database?.totals.averageConfidence || 0
+  const totals = useMemo(() => {
+    if (activeSnapshot && (!activeSnapshotRunning || activeSnapshot.leads.length > 0)) {
+      return {
+        total: activeSnapshot.totals.readyLeads + activeSnapshot.totals.actionableLeads,
+        readyLeads: activeSnapshot.totals.readyLeads,
+        actionableLeads: activeSnapshot.totals.actionableLeads,
+        withContacts: activeSnapshot.totals.withContacts,
+        withVolume: activeSnapshot.totals.withVolume,
+        averageConfidence: activeSnapshot.totals.averageConfidence
       };
+    }
+
+    return {
+      total: database?.totals.total || 0,
+      readyLeads: database?.totals.readyLeads || 0,
+      actionableLeads: database?.totals.actionableLeads || 0,
+      withContacts: database?.totals.withContacts || 0,
+      withVolume: database?.totals.withVolume || 0,
+      averageConfidence: database?.totals.averageConfidence || 0
+    };
+  }, [activeSnapshot, activeSnapshotRunning, database]);
+
+  const persistedSummary = useMemo(() => {
+    if (!activeSnapshot || isRunningStatus(activeSnapshot.job.status)) return null;
+
+    const leadSavedCount = activeSnapshot.leads.filter((item) => Boolean(item.leadId)).length;
+    const companySavedCount = new Set(activeSnapshot.leads.map((item) => item.company.trim()).filter(Boolean)).size;
+    const contactSavedCount = activeSnapshot.leads.filter((item) => Boolean(item.contactPerson || item.email || item.phone)).length;
+
+    return {
+      leadSavedCount,
+      companySavedCount,
+      contactSavedCount
+    };
+  }, [activeSnapshot]);
+
+  const showNoCompanyResults =
+    persistedSummary && persistedSummary.companySavedCount === 0 && persistedSummary.leadSavedCount === 0;
 
   return (
     <div className="space-y-6">
@@ -512,19 +627,18 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
             {loading ? t("leadDatabase.running") : t("leadDatabase.run")}
           </Button>
         </form>
-        {snapshot ? (
+        {activeSnapshot ? (
           <p className="mt-3 text-xs text-slate-500">
-            {t("leadDatabase.jobStatus")}: {snapshot.job.status} {polling ? ` • ${t("leadDatabase.updating")}` : ""}
+            {t("leadDatabase.jobStatus")}: {activeSnapshot.job.status} {polling ? ` • ${t("leadDatabase.updating")}` : ""}
           </p>
         ) : null}
+        {polling ? <p className="mt-2 text-xs text-slate-500">{t("leadDatabase.searchingNow")}</p> : null}
       </Card>
 
       <Card className="space-y-3">
         <CardTitle>{t("leadDatabase.searchHistory")}</CardTitle>
         {historyLoading ? <p className="text-sm text-slate-500">{t("leadDatabase.historyLoading")}</p> : null}
-        {!historyLoading && history.length === 0 ? (
-          <p className="text-sm text-slate-500">{t("leadDatabase.noHistory")}</p>
-        ) : null}
+        {!historyLoading && history.length === 0 ? <p className="text-sm text-slate-500">{t("leadDatabase.noHistory")}</p> : null}
         {!historyLoading && history.length > 0 ? (
           <div className="space-y-2">
             {history.slice(0, 12).map((item) => (
@@ -536,8 +650,8 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
                   <p className="truncate text-sm font-medium text-slate-900">{item.query}</p>
                   <p className="text-xs text-slate-500">
                     {new Date(item.created_at).toLocaleString(locale === "ru" ? "ru-RU" : "en-US")} • {item.total_results}{" "}
-                    {t("leadDatabase.historyResults")} • {item.imported_leads} {t("leadDatabase.historyImported")} •{" "}
-                    {item.source_count} {t("leadDatabase.historySources")}
+                    {t("leadDatabase.historyResults")} • {item.imported_leads} {t("leadDatabase.historyImported")} • {item.source_count}{" "}
+                    {t("leadDatabase.historySources")}
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -580,6 +694,29 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
           <p className="text-3xl font-bold text-slate-900">{totals.total}</p>
         </Card>
       </div>
+
+      {persistedSummary ? (
+        <Card>
+          {showNoCompanyResults ? (
+            <p className="text-sm font-medium text-slate-700">{t("leadDatabase.noCompanyResultsFound")}</p>
+          ) : (
+            <div className="grid gap-3 text-sm text-slate-700 md:grid-cols-4">
+              <p>
+                {t("leadDatabase.savedToLeadDatabase")}: <strong>{activeSnapshot?.leads.length || 0}</strong>
+              </p>
+              <p>
+                {t("leadDatabase.savedToCompanies")}: <strong>{persistedSummary.companySavedCount}</strong>
+              </p>
+              <p>
+                {t("leadDatabase.savedToContacts")}: <strong>{persistedSummary.contactSavedCount}</strong>
+              </p>
+              <p>
+                {t("leadDatabase.savedToLeads")}: <strong>{persistedSummary.leadSavedCount}</strong>
+              </p>
+            </div>
+          )}
+        </Card>
+      ) : null}
 
       <Card className="space-y-4">
         <CardTitle>{t("leadDatabase.filters")}</CardTitle>
@@ -644,7 +781,14 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
       ) : null}
 
       {filteredItems.length === 0 ? (
-        <EmptyState title={t("leadDatabase.emptyTitle")} description={t("leadDatabase.emptyDescription")} />
+        <div className="space-y-3">
+          <EmptyState title={t("leadDatabase.emptyTitle")} description={t("leadDatabase.emptyDescription")} />
+          <div className="flex justify-center">
+            <Link href="/market-intelligence">
+              <Button variant="secondary">{t("leadDatabase.openFallbackSearch")}</Button>
+            </Link>
+          </div>
+        </div>
       ) : (
         <div className="overflow-x-auto rounded-xl border bg-white">
           <Table>
@@ -697,15 +841,11 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
                     <Badge variant={item.tier === "ready" ? "success" : item.tier === "actionable" ? "warning" : "default"}>
                       {t(`leadDatabase.tier.${item.tier}`)}
                     </Badge>
-                    {item.savedFromSearch ? (
-                      <p className="mt-1 text-[11px] text-slate-500">{t("leadDatabase.savedFromSearchYes")}</p>
-                    ) : null}
+                    {item.savedFromSearch ? <p className="mt-1 text-[11px] text-slate-500">{t("leadDatabase.savedFromSearchYes")}</p> : null}
                     {item.reviewStatus === "PENDING_REVIEW" ? (
                       <p className="mt-1 text-[11px] text-amber-700">{t("leadDatabase.pendingReview")}</p>
                     ) : null}
-                    {item.lowConfidence ? (
-                      <p className="mt-1 text-[11px] text-slate-500">{t("leadDatabase.lowConfidenceHidden")}</p>
-                    ) : null}
+                    {item.lowConfidence ? <p className="mt-1 text-[11px] text-slate-500">{t("leadDatabase.lowConfidenceHidden")}</p> : null}
                     <div className="mt-1 space-x-1">
                       <Badge variant="default">{t(`sourceKind.${item.sourceKind}`)}</Badge>
                       <Badge variant="default">{t(`importMode.${item.importMode}`)}</Badge>
@@ -713,9 +853,7 @@ export function LeadDatabaseClient({ locale }: { locale: Locale }) {
                   </TD>
                   <TD>
                     <Badge variant={roleVariant(item.role)}>{t(`leadDatabase.role.${item.role}`)}</Badge>
-                    {item.sourceRecordType === "raw" ? (
-                      <p className="mt-1 text-[11px] text-slate-500">{t("leadDatabase.pendingImport")}</p>
-                    ) : null}
+                    {item.sourceRecordType === "raw" ? <p className="mt-1 text-[11px] text-slate-500">{t("leadDatabase.pendingImport")}</p> : null}
                   </TD>
                   <TD>{item.country || t("common.noData")}</TD>
                   <TD>{item.product || t("common.noData")}</TD>

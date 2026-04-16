@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ExternalLink } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -79,8 +79,10 @@ const confidenceVariant = (score: number) => {
   return "default" as const;
 };
 
+const isRunningStatus = (status: string | undefined) => status === "PENDING" || status === "RUNNING";
+
 export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
-  const t = getTranslator(locale);
+  const t = useMemo(() => getTranslator(locale), [locale]);
 
   const [query, setQuery] = useState("");
   const [country, setCountry] = useState("");
@@ -101,6 +103,9 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
   const [actionState, setActionState] = useState<Record<string, string>>({});
   const [outreachByLeadId, setOutreachByLeadId] = useState<Record<string, string>>({});
 
+  const activeJobRef = useRef<string | null>(null);
+  const pollRequestRef = useRef(0);
+
   const toOperatorSafeMessage = useCallback(
     (value: unknown, fallback: string) => {
       const message = value instanceof Error ? value.message : fallback;
@@ -118,40 +123,70 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
   );
 
   useEffect(() => {
+    activeJobRef.current = jobId;
+  }, [jobId]);
+
+  useEffect(() => {
     if (!jobId) return;
+
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
+    let controller: AbortController | null = null;
+    let retries = 0;
+    const expectedJobId = jobId;
 
     const poll = async () => {
+      if (cancelled || activeJobRef.current !== expectedJobId) return;
+
+      const requestId = ++pollRequestRef.current;
+      controller?.abort();
+      controller = new AbortController();
+
       try {
         setPolling(true);
-        const response = await fetch(`/api/lead-discovery/jobs/${jobId}`);
+        const response = await fetch(`/api/lead-discovery/jobs/${expectedJobId}`, {
+          signal: controller.signal,
+          cache: "no-store"
+        });
         const json = (await response.json().catch(() => ({}))) as ApiPayload<LeadDiscoverySnapshot>;
 
         if (!response.ok || !json.data) {
           throw new Error(json.error || t("leadDiscovery.loadError"));
         }
 
-        if (cancelled) return;
+        if (cancelled || activeJobRef.current !== expectedJobId || requestId !== pollRequestRef.current) return;
+
         setSnapshot(json.data);
         setError(null);
 
-        if (json.data.job.status === "PENDING" || json.data.job.status === "RUNNING") {
+        if (isRunningStatus(json.data.job.status)) {
           timer = setTimeout(() => void poll(), 2500);
+          return;
         }
+
+        setPolling(false);
       } catch (err) {
-        if (cancelled) return;
+        if (controller.signal.aborted) return;
+        if (cancelled || activeJobRef.current !== expectedJobId || requestId !== pollRequestRef.current) return;
+
+        retries += 1;
         setError(toOperatorSafeMessage(err, t("leadDiscovery.loadError")));
-        timer = setTimeout(() => void poll(), 4000);
-      } finally {
-        if (!cancelled) setPolling(false);
+
+        if (retries < 3) {
+          timer = setTimeout(() => void poll(), 3500);
+        } else {
+          setPolling(false);
+        }
       }
     };
 
     void poll();
+
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      controller?.abort();
+      setPolling(false);
     };
   }, [jobId, t, toOperatorSafeMessage]);
 
@@ -177,10 +212,17 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
       });
       const json = (await response.json().catch(() => ({}))) as ApiPayload<{ job_id: string }>;
       if (!response.ok || !json.data?.job_id) throw new Error(json.error || t("leadDiscovery.createError"));
+
       setSnapshot(null);
       setJobId(json.data.job_id);
       setActionState({});
       setOutreachByLeadId({});
+
+      setRoleFilter("");
+      setCountryFilter("");
+      setSourceFilter("");
+      setProductFilter("");
+      setConfidenceFilter("65");
     } catch (err) {
       setError(toOperatorSafeMessage(err, t("leadDiscovery.createError")));
     } finally {
@@ -204,6 +246,20 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
   const sourceOptions = useMemo(() => {
     if (!snapshot) return [];
     return Array.from(new Set(snapshot.leads.map((item) => item.sourceName))).sort((a, b) => a.localeCompare(b));
+  }, [snapshot]);
+
+  const persistedSummary = useMemo(() => {
+    if (!snapshot || isRunningStatus(snapshot.job.status)) return null;
+
+    const leadSavedCount = snapshot.leads.filter((item) => Boolean(item.leadId)).length;
+    const companySavedCount = new Set(snapshot.leads.map((item) => item.company.trim()).filter(Boolean)).size;
+    const contactSavedCount = snapshot.leads.filter((item) => Boolean(item.contactName || item.contactEmail || item.contactPhone)).length;
+
+    return {
+      leadSavedCount,
+      companySavedCount,
+      contactSavedCount
+    };
   }, [snapshot]);
 
   const postJson = async (url: string, payload: Record<string, unknown>) => {
@@ -291,7 +347,7 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
           with_ai: false
         })
       });
-      const json = (await response.json().catch(() => ({}))) as ApiPayload<{ leadId?: string; status?: string }>;
+      const json = (await response.json().catch(() => ({}))) as ApiPayload<{ leadId?: string }>;
       if (!response.ok || !json.data?.leadId) throw new Error(json.error || t("leadDiscovery.actionFailed"));
       const savedLeadId = json.data.leadId;
       setActionState((prev) => ({ ...prev, [lead.id]: t("leadDiscovery.saved") }));
@@ -307,6 +363,9 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
       setActionState((prev) => ({ ...prev, [lead.id]: toOperatorSafeMessage(err, t("leadDiscovery.actionFailed")) }));
     }
   };
+
+  const showNoCompanyResults =
+    persistedSummary && persistedSummary.companySavedCount === 0 && persistedSummary.leadSavedCount === 0;
 
   return (
     <div className="space-y-6">
@@ -333,6 +392,7 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
           </Button>
         </form>
         <p className="mt-3 text-xs text-slate-500">{t("leadDiscovery.examples")}</p>
+        {polling ? <p className="mt-2 text-xs text-slate-500">{t("leadDiscovery.searchingNow")}</p> : null}
       </Card>
 
       {error ? (
@@ -359,6 +419,29 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
             <p className="text-xs text-slate-500">{polling ? t("leadDiscovery.updating") : t("leadDiscovery.stable")}</p>
           </Card>
         </div>
+      ) : null}
+
+      {persistedSummary ? (
+        <Card>
+          {showNoCompanyResults ? (
+            <p className="text-sm font-medium text-slate-700">{t("leadDiscovery.noCompanyResultsFound")}</p>
+          ) : (
+            <div className="grid gap-3 text-sm text-slate-700 md:grid-cols-4">
+              <p>
+                {t("leadDiscovery.savedToLeadDatabase")}: <strong>{snapshot?.leads.length || 0}</strong>
+              </p>
+              <p>
+                {t("leadDiscovery.savedToCompanies")}: <strong>{persistedSummary.companySavedCount}</strong>
+              </p>
+              <p>
+                {t("leadDiscovery.savedToContacts")}: <strong>{persistedSummary.contactSavedCount}</strong>
+              </p>
+              <p>
+                {t("leadDiscovery.savedToLeads")}: <strong>{persistedSummary.leadSavedCount}</strong>
+              </p>
+            </div>
+          )}
+        </Card>
       ) : null}
 
       {snapshot ? (
@@ -399,7 +482,14 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
       {!snapshot ? (
         <EmptyState title={t("leadDiscovery.emptyTitle")} description={t("leadDiscovery.emptyDescription")} />
       ) : filteredLeads.length === 0 ? (
-        <EmptyState title={t("leadDiscovery.noMatches")} description={t("leadDiscovery.noMatchesDescription")} />
+        <div className="space-y-3">
+          <EmptyState title={t("leadDiscovery.noMatches")} description={t("leadDiscovery.noMatchesDescription")} />
+          <div className="flex justify-center">
+            <Link href="/market-intelligence">
+              <Button variant="secondary">{t("leadDiscovery.openFallbackSearch")}</Button>
+            </Link>
+          </div>
+        </div>
       ) : (
         <div className="space-y-4">
           {filteredLeads.map((lead) => (
@@ -434,8 +524,7 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
 
               <div className="grid gap-3 md:grid-cols-3">
                 <p className="text-sm text-slate-600">
-                  <span className="font-semibold text-slate-800">{t("leadDiscovery.contact")}:</span>{" "}
-                  {lead.contactName || "-"}
+                  <span className="font-semibold text-slate-800">{t("leadDiscovery.contact")}:</span> {lead.contactName || "-"}
                 </p>
                 <p className="text-sm text-slate-600">
                   <span className="font-semibold text-slate-800">Email:</span> {lead.contactEmail || "-"}
