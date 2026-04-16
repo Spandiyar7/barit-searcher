@@ -6,6 +6,7 @@ import { getSourcePerformanceDashboardData } from "@/lib/services/source-perform
 import { SOURCE_CATALOG } from "@/lib/services/market-intelligence/source-catalog";
 
 type DiscoveryRole = "buyer" | "supplier" | "importer" | "exporter" | "manufacturer" | "trader";
+type DiscoveryStage = "strong" | "probable";
 type WhyMatchedCode =
   | "roleMatch"
   | "countryMatch"
@@ -18,6 +19,7 @@ type WhyMatchedCode =
 
 export type LeadDiscoveryItem = {
   id: string;
+  discoveryStage: DiscoveryStage;
   leadId: string | null;
   dealId: string | null;
   company: string;
@@ -50,6 +52,7 @@ export type LeadDiscoverySnapshot = {
   };
   totals: {
     readyLeads: number;
+    probableCompanies: number;
     hiddenReview: number;
     lowConfidence: number;
     imported: number;
@@ -98,6 +101,17 @@ const normalizeCompanyKey = (value: string | null | undefined) => {
   const normalized = (value || "").trim().toLowerCase().replace(/\s+/g, " ");
   if (!normalized || normalized === "unknown company") return "";
   return normalized;
+};
+
+const NON_COMPANY_PATTERN =
+  /\b(news|blog|article|media|press|forum|wikipedia|reddit|quora|linkedin|facebook|instagram|youtube|x\.com|twitter)\b/i;
+
+const isLikelyCompanyIdentity = (value: string | null | undefined) => {
+  const normalized = (value || "").trim();
+  if (!normalized || normalized.length < 2) return false;
+  if (/^(unknown|n\/a|na|none|null|anonymous)(\s|$)/i.test(normalized)) return false;
+  if (NON_COMPANY_PATTERN.test(normalized)) return false;
+  return true;
 };
 
 const isTradingSignalResult = (result: JobResultItem) => {
@@ -208,12 +222,10 @@ export const getLeadDiscoverySnapshot = async (jobId: string): Promise<LeadDisco
     SOURCE_CATALOG.map((item) => [item.name.toLowerCase(), item.group])
   );
 
-  const readyResults = snapshot.results.filter(
-    (item) => item.persistence_status === "imported" || item.persistence_status === "duplicate"
-  );
+  const allResults = snapshot.results;
   const companySignalMap = new Map<string, { count: number; signalCount: number; sources: Set<string> }>();
 
-  snapshot.results.forEach((item) => {
+  allResults.forEach((item) => {
     const key = normalizeCompanyKey(item.company);
     if (!key) return;
     const existing = companySignalMap.get(key) || { count: 0, signalCount: 0, sources: new Set<string>() };
@@ -223,8 +235,8 @@ export const getLeadDiscoverySnapshot = async (jobId: string): Promise<LeadDisco
     companySignalMap.set(key, existing);
   });
 
-  const leadIdSet = new Set(readyResults.map((item) => item.lead_id).filter((value): value is string => Boolean(value)));
-  const sourceUrlSet = new Set(readyResults.map((item) => item.source_url).filter(Boolean));
+  const leadIdSet = new Set(allResults.map((item) => item.lead_id).filter((value): value is string => Boolean(value)));
+  const sourceUrlSet = new Set(allResults.map((item) => item.source_url).filter(Boolean));
 
   const leads = await prisma.lead.findMany({
     where: {
@@ -252,7 +264,7 @@ export const getLeadDiscoverySnapshot = async (jobId: string): Promise<LeadDisco
 
   const parsed = snapshot.parsed_query;
 
-  const discoveryLeads: LeadDiscoveryItem[] = readyResults
+  const discoveryLeads: LeadDiscoveryItem[] = allResults
     .map((result) => {
     const linkedLead = (result.lead_id && leadById.get(result.lead_id)) || leadBySourceUrl.get(result.source_url) || null;
     const firstContact = linkedLead?.company?.contacts.find((item) => Boolean(item.email || item.phone || item.fullName)) || null;
@@ -280,7 +292,8 @@ export const getLeadDiscoverySnapshot = async (jobId: string): Promise<LeadDisco
     const freshnessDate = parsePostedDate(result.posted_date) || linkedLead?.publishedAt || linkedLead?.createdAt || new Date();
     const freshness = getFreshnessScore(freshnessDate);
     const roleRelevance = getRoleRelevance(parsed.intent, role);
-    const hasCompanyIdentity = Boolean(companyKey);
+    const companyName = linkedLead?.company?.name || result.company;
+    const hasCompanyIdentity = isLikelyCompanyIdentity(companyName);
     const hasContactData = Boolean(firstContact?.email || firstContact?.phone || result.contact_name);
 
     const ranking =
@@ -300,21 +313,35 @@ export const getLeadDiscoverySnapshot = async (jobId: string): Promise<LeadDisco
     const countryMatched = Boolean(parsed.target_country_or_region && countryText.includes(parsed.target_country_or_region.toLowerCase()));
     const productText = `${result.product || ""} ${result.description || ""}`.toLowerCase();
     const productMatched = Boolean(parsed.product && productText.includes(parsed.product.toLowerCase()));
-    const qualityPassed =
-      confidence >= 0.62 &&
-      sourceQuality >= 0.35 &&
+    const strongCandidate =
+      (result.persistence_status === "imported" || result.persistence_status === "duplicate") &&
+      confidence >= 0.58 &&
+      sourceQuality >= 0.25 &&
       !rfqOnly &&
       hasCompanyIdentity &&
-      (hasTradingSignal || repeatedSignals || multiSource || roleRelevance >= 0.8) &&
-      (enrichmentScore >= 0.28 || hasContactData);
+      (hasTradingSignal || repeatedSignals || multiSource || roleRelevance >= 0.72 || enrichmentScore >= 0.25);
 
-    if (!qualityPassed) return null;
+    const probableCandidate =
+      !strongCandidate &&
+      hasCompanyIdentity &&
+      confidence >= 0.38 &&
+      sourceQuality >= 0.18 &&
+      (hasTradingSignal ||
+        repeatedSignals ||
+        multiSource ||
+        roleRelevance >= 0.55 ||
+        enrichmentScore >= 0.12 ||
+        result.persistence_status === "staged" ||
+        result.persistence_status === "logged");
+
+    if (!strongCandidate && !probableCandidate) return null;
 
     return {
       id: result.id,
+      discoveryStage: strongCandidate ? "strong" : "probable",
       leadId: linkedLead?.id || result.lead_id || null,
       dealId: linkedLead?.sourceDeal?.id || null,
-      company: linkedLead?.company?.name || result.company || "Unknown company",
+      company: companyName || "Unknown company",
       country: linkedLead?.originCountry || result.country || result.destination || null,
       role,
       product: linkedLead?.product?.name || result.product || parsed.product || null,
@@ -344,7 +371,14 @@ export const getLeadDiscoverySnapshot = async (jobId: string): Promise<LeadDisco
   })
   .filter((item): item is LeadDiscoveryItem => Boolean(item));
 
-  discoveryLeads.sort((a, b) => b.rankingScore - a.rankingScore || b.confidenceScore - a.confidenceScore);
+  discoveryLeads.sort((a, b) => {
+    const stageDelta = (b.discoveryStage === "strong" ? 1 : 0) - (a.discoveryStage === "strong" ? 1 : 0);
+    if (stageDelta !== 0) return stageDelta;
+    return b.rankingScore - a.rankingScore || b.confidenceScore - a.confidenceScore;
+  });
+
+  const readyLeadsCount = discoveryLeads.filter((item) => item.discoveryStage === "strong").length;
+  const probableCompaniesCount = discoveryLeads.filter((item) => item.discoveryStage === "probable").length;
 
   return {
     job: {
@@ -356,7 +390,8 @@ export const getLeadDiscoverySnapshot = async (jobId: string): Promise<LeadDisco
       targetCountry: parsed.target_country_or_region
     },
     totals: {
-      readyLeads: discoveryLeads.length,
+      readyLeads: readyLeadsCount,
+      probableCompanies: probableCompaniesCount,
       hiddenReview: snapshot.results.filter((item) => item.persistence_status === "staged").length,
       lowConfidence: snapshot.results.filter((item) => item.persistence_status === "logged").length,
       imported: snapshot.results.filter((item) => item.persistence_status === "imported").length,

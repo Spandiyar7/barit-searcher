@@ -467,7 +467,7 @@ const scoreSource = (source: SourceDescriptor, parsedQuery: ParsedQuery, perf?: 
       reasons.push("Food/agri priority source");
     }
     if (source.id === "direct_websites") {
-      score += 56;
+      score += 18;
       reasons.push("Company-first website priority");
     }
     if (FOOD_AGRICULTURE_LOCAL_DIRECTORY_SOURCE_IDS.has(source.id)) {
@@ -482,7 +482,7 @@ const scoreSource = (source: SourceDescriptor, parsedQuery: ParsedQuery, perf?: 
       score -= 22;
       reasons.push("Directory fallback for food/agri");
     }
-    if (source.group === "directories" || source.group === "direct_websites") {
+    if (source.group === "directories") {
       score += 12;
       reasons.push("Food/agri directory boost");
     }

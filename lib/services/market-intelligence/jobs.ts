@@ -20,6 +20,7 @@ import type {
   CreateSearchJobResponse,
   JobResultItem,
   MarketIntelligenceJobSnapshot,
+  NormalizedMarketResult,
   ParsedQuery,
   SavedSearchInput,
   SavedSearchItem,
@@ -61,7 +62,156 @@ const hasValidCompanyName = (value: string | null | undefined) => {
   if (!normalized || normalized.length < 2) return false;
   if (/^(unknown|n\/a|na|none|null|anonymous)(\s|$)/.test(normalized)) return false;
   if (normalized.includes("not provided")) return false;
+  if (/\b(news|blog|article|media|press|forum|wikipedia|reddit|quora|linkedin|facebook|instagram|youtube|twitter|x\.com)\b/.test(normalized)) {
+    return false;
+  }
   return true;
+};
+
+const COMPANY_SUFFIX_PATTERN =
+  /\b([a-z0-9][a-z0-9&.,'()\- ]{1,90}\s(?:llc|ltd|limited|inc|corp|co\.?|company|group|gmbh|sarl|fze|dmcc|pte|ag|bv|srl))\b/gi;
+const QUOTED_COMPANY_PATTERN = /["“”]([^"“”]{3,120})["“”]/g;
+const EXPLICIT_COMPANY_PATTERN = /\b(?:company|supplier|buyer|manufacturer|exporter|importer|distributor)\s*[:\-]\s*([^\n|,;]{3,120})/gi;
+const COMPANY_SEED_BLOCKED_HOSTS = [
+  "kompass.com",
+  "europages.com",
+  "alibaba.com",
+  "tradekey.com",
+  "tradewheel.com",
+  "go4worldbusiness.com",
+  "ec21.com",
+  "exporthub.com",
+  "facebook.com",
+  "instagram.com",
+  "linkedin.com",
+  "x.com",
+  "twitter.com",
+  "youtube.com",
+  "wikipedia.org",
+  "reddit.com",
+  "quora.com"
+];
+
+const cleanCandidateCompany = (value: string) =>
+  normalizeCompanyName(
+    value
+      .replace(/^[\s\-–—|,:;]+/, "")
+      .replace(/[\s\-–—|,:;]+$/, "")
+      .replace(/\s+/g, " ")
+  );
+
+const extractCompanyCandidatesFromText = (text: string) => {
+  const normalized = text.trim();
+  if (!normalized) return [];
+
+  const candidates = new Set<string>();
+
+  const applyMatch = (candidate: string) => {
+    const cleaned = cleanCandidateCompany(candidate);
+    if (!hasValidCompanyName(cleaned)) return;
+    if (cleaned.length > 110) return;
+    candidates.add(cleaned);
+  };
+
+  for (const match of normalized.matchAll(EXPLICIT_COMPANY_PATTERN)) {
+    applyMatch(match[1] || "");
+  }
+  for (const match of normalized.matchAll(QUOTED_COMPANY_PATTERN)) {
+    applyMatch(match[1] || "");
+  }
+  for (const match of normalized.matchAll(COMPANY_SUFFIX_PATTERN)) {
+    applyMatch(match[1] || "");
+  }
+
+  return Array.from(candidates).slice(0, 6);
+};
+
+const toRootUrl = (value: string) => {
+  try {
+    const parsed = new URL(value);
+    return `${parsed.protocol}//${parsed.hostname}/`;
+  } catch {
+    return value;
+  }
+};
+
+const toHost = (value: string) => {
+  try {
+    return new URL(value).hostname.replace(/^www\./i, "").toLowerCase();
+  } catch {
+    return "";
+  }
+};
+
+const isLikelyCompanyWebsiteForSeed = (value: string) => {
+  const host = toHost(value);
+  if (!host) return false;
+  if (host.endsWith(".gov") || host.endsWith(".edu")) return false;
+  return !COMPANY_SEED_BLOCKED_HOSTS.some((hint) => host.includes(hint));
+};
+
+const enrichResultsWithCompanyCandidates = (results: NormalizedMarketResult[]) => {
+  let extractedCandidates = 0;
+  let rejectedCandidates = 0;
+
+  const enriched = results.map((item) => {
+    if (hasValidCompanyName(item.company)) return item;
+
+    const candidates = extractCompanyCandidatesFromText(`${item.description || ""}\n${item.raw_text || ""}`);
+    if (candidates.length === 0) {
+      rejectedCandidates += 1;
+      return item;
+    }
+
+    const candidate = candidates[0];
+    if (!hasValidCompanyName(candidate)) {
+      rejectedCandidates += 1;
+      return item;
+    }
+
+    extractedCandidates += 1;
+    const description = item.description.includes(candidate) ? item.description : `${candidate} • ${item.description}`;
+
+    return {
+      ...item,
+      company: candidate,
+      description,
+      confidence_score: Number(Math.max(item.confidence_score, 0.46).toFixed(2))
+    };
+  });
+
+  return {
+    results: enriched,
+    extractedCandidates,
+    rejectedCandidates
+  };
+};
+
+const collectDirectWebsiteSeeds = (results: JobResultItem[]) => {
+  const companyNames = new Set<string>();
+  const websites = new Set<string>();
+
+  results.forEach((item) => {
+    const company = cleanCandidateCompany(item.company || "");
+    if (hasValidCompanyName(company)) {
+      companyNames.add(company);
+    } else {
+      const candidates = extractCompanyCandidatesFromText(`${item.description || ""}\n${item.raw_text || ""}`);
+      candidates.forEach((candidate) => {
+        if (hasValidCompanyName(candidate)) companyNames.add(candidate);
+      });
+    }
+
+    const sourceUrl = normalizeSourceUrl(item.source_url || "");
+    if (sourceUrl && isLikelyCompanyWebsiteForSeed(sourceUrl)) {
+      websites.add(toRootUrl(sourceUrl));
+    }
+  });
+
+  return {
+    companyNames: Array.from(companyNames).slice(0, 20),
+    websites: Array.from(websites).slice(0, 30)
+  };
 };
 
 const computePersistenceRelevance = (result: JobResultItem) => {
@@ -266,6 +416,20 @@ const persistResult = async (input: {
   result: JobResultItem;
   parsedQuery: ParsedQuery;
 }) => {
+  const inferredCandidates =
+    hasValidCompanyName(input.result.company)
+      ? []
+      : extractCompanyCandidatesFromText(`${input.result.description || ""}\n${input.result.raw_text || ""}`);
+  const inferredCompany = inferredCandidates[0] || null;
+  const resultForPersistence: JobResultItem =
+    inferredCompany && !hasValidCompanyName(input.result.company)
+      ? {
+          ...input.result,
+          company: inferredCompany,
+          confidence_score: Number(Math.max(input.result.confidence_score, 0.46).toFixed(2))
+        }
+      : input.result;
+
   const normalizedSourceUrl = normalizeSourceUrl(input.result.source_url);
   if (!normalizedSourceUrl) {
     return {
@@ -277,19 +441,19 @@ const persistResult = async (input: {
   const hash = sourceUrlHash(normalizedSourceUrl);
   const matchedLead = await findMatchingLeadBySignals({
     source_url: normalizedSourceUrl,
-    source_name: input.result.source_name,
-    company: input.result.company,
-    product: input.result.product,
-    description: input.result.description,
-    raw_text: input.result.raw_text,
-    country: input.result.country,
-    contact_name: input.result.contact_name
+    source_name: resultForPersistence.source_name,
+    company: resultForPersistence.company,
+    product: resultForPersistence.product,
+    description: resultForPersistence.description,
+    raw_text: resultForPersistence.raw_text,
+    country: resultForPersistence.country,
+    contact_name: resultForPersistence.contact_name
   });
 
-  const relevance = computePersistenceRelevance(input.result);
+  const relevance = computePersistenceRelevance(resultForPersistence);
   const lowConfidence = relevance < MEDIUM_CONFIDENCE_THRESHOLD;
   const normalizedPayload = {
-    ...input.result,
+    ...resultForPersistence,
     source_url: normalizedSourceUrl,
     relevance_score: relevance,
     saved_from_search: true,
@@ -315,13 +479,13 @@ const persistResult = async (input: {
     ? null
     : await findMatchingRawLeadBySignals({
         source_url: normalizedSourceUrl,
-        source_name: input.result.source_name,
-        company: input.result.company,
-        product: input.result.product,
-        description: input.result.description,
-        raw_text: input.result.raw_text,
-        country: input.result.country,
-        contact_name: input.result.contact_name
+        source_name: resultForPersistence.source_name,
+        company: resultForPersistence.company,
+        product: resultForPersistence.product,
+        description: resultForPersistence.description,
+        raw_text: resultForPersistence.raw_text,
+        country: resultForPersistence.country,
+        contact_name: resultForPersistence.contact_name
       });
 
   const fuzzyRaw =
@@ -344,30 +508,30 @@ const persistResult = async (input: {
     ? await prisma.rawMarketLead.update({
         where: { id: candidateRaw.id },
         data: {
-          sourceName: input.result.source_name,
+          sourceName: resultForPersistence.source_name,
           searchJobId: input.jobId,
           sourceRunId: input.sourceRunId,
           normalized: mergeNormalizedPayload(candidateRaw.normalized, normalizedPayload, normalizedSourceUrl) as unknown as Prisma.InputJsonValue,
-          aiClassification: input.result.ai_classification || null,
-          aiSummary: input.result.ai_summary || null,
+          aiClassification: resultForPersistence.ai_classification || null,
+          aiSummary: resultForPersistence.ai_summary || null,
           relevanceScore: relevance || null,
-          confidenceScore: input.result.confidence_score || null,
+          confidenceScore: resultForPersistence.confidence_score || null,
           status: candidateRaw.leadId ? "IMPORTED" : "PENDING_REVIEW"
         },
         select: { id: true, leadId: true }
       })
     : await prisma.rawMarketLead.create({
         data: {
-          sourceName: input.result.source_name,
+          sourceName: resultForPersistence.source_name,
           sourceUrl: normalizedSourceUrl,
           sourceUrlHash: hash,
           searchJobId: input.jobId,
           sourceRunId: input.sourceRunId,
           normalized: normalizedPayload as unknown as Prisma.InputJsonValue,
-          aiClassification: input.result.ai_classification || null,
-          aiSummary: input.result.ai_summary || null,
+          aiClassification: resultForPersistence.ai_classification || null,
+          aiSummary: resultForPersistence.ai_summary || null,
           relevanceScore: relevance || null,
-          confidenceScore: input.result.confidence_score || null,
+          confidenceScore: resultForPersistence.confidence_score || null,
           status: "PENDING_REVIEW"
         },
         select: { id: true, leadId: true }
@@ -376,15 +540,15 @@ const persistResult = async (input: {
   if (matchedLead) {
     await updateExistingLeadFromResult(matchedLead.leadId, {
       source_url: normalizedSourceUrl,
-      source_name: input.result.source_name,
-      description: input.result.description,
-      raw_text: input.result.raw_text,
-      country: input.result.country,
-      destination: input.result.destination,
-      payment_terms: input.result.payment_terms,
-      incoterms: input.result.incoterms,
-      ai_summary: input.result.ai_summary,
-      contact_name: input.result.contact_name
+      source_name: resultForPersistence.source_name,
+      description: resultForPersistence.description,
+      raw_text: resultForPersistence.raw_text,
+      country: resultForPersistence.country,
+      destination: resultForPersistence.destination,
+      payment_terms: resultForPersistence.payment_terms,
+      incoterms: resultForPersistence.incoterms,
+      ai_summary: resultForPersistence.ai_summary,
+      contact_name: resultForPersistence.contact_name
     });
 
     await prisma.rawMarketLead.update({
@@ -406,15 +570,15 @@ const persistResult = async (input: {
   if (stagedRawLead.leadId) {
     await updateExistingLeadFromResult(stagedRawLead.leadId, {
       source_url: normalizedSourceUrl,
-      source_name: input.result.source_name,
-      description: input.result.description,
-      raw_text: input.result.raw_text,
-      country: input.result.country,
-      destination: input.result.destination,
-      payment_terms: input.result.payment_terms,
-      incoterms: input.result.incoterms,
-      ai_summary: input.result.ai_summary,
-      contact_name: input.result.contact_name
+      source_name: resultForPersistence.source_name,
+      description: resultForPersistence.description,
+      raw_text: resultForPersistence.raw_text,
+      country: resultForPersistence.country,
+      destination: resultForPersistence.destination,
+      payment_terms: resultForPersistence.payment_terms,
+      incoterms: resultForPersistence.incoterms,
+      ai_summary: resultForPersistence.ai_summary,
+      contact_name: resultForPersistence.contact_name
     });
 
     return {
@@ -425,7 +589,7 @@ const persistResult = async (input: {
     };
   }
 
-  if (hasValidCompanyName(input.result.company)) {
+  if (hasValidCompanyName(resultForPersistence.company)) {
     try {
       const imported = await importMarketIntelligenceLead({
         result: {
@@ -703,6 +867,7 @@ export const processSearchJob = async (jobId: string) => {
     let savedRawLeads = 0;
     let lowConfidenceDropped = 0;
     const jobWarnings: string[] = [];
+    const discoveredResultsForSeeds: JobResultItem[] = [];
 
     const maxResultsPerSource = job.maxResultsPerSource || DEFAULT_RESULTS_PER_SOURCE;
     const recommendedSources = parseJson<SourceRecommendation[]>(job.recommendedSources, []);
@@ -714,6 +879,10 @@ export const processSearchJob = async (jobId: string) => {
         totalResults += run.extractedResults;
         importedLeads += run.importedLeads;
         savedRawLeads += run.savedRawLeads;
+        const previousResults = parseJson<JobResultItem[]>(run.resultsJson, []);
+        if (previousResults.length > 0) {
+          discoveredResultsForSeeds.push(...previousResults);
+        }
         continue;
       }
 
@@ -725,7 +894,25 @@ export const processSearchJob = async (jobId: string) => {
         }
       });
 
-      const execution = await executeSourceWithFallback(run.sourceId as SourceId, parsedQuery, maxResultsPerSource, {
+      let executionParsedQuery = parsedQuery;
+      if (run.sourceId === "direct_websites") {
+        const seeds = collectDirectWebsiteSeeds(discoveredResultsForSeeds);
+        if (seeds.companyNames.length > 0 || seeds.websites.length > 0) {
+          const seededQuery = `${parsedQuery.query} ${seeds.companyNames.map((name) => `"${name}"`).join(" ")}`.trim();
+          executionParsedQuery = {
+            ...parsedQuery,
+            query: seededQuery || parsedQuery.query,
+            custom_sources: Array.from(new Set([...(parsedQuery.custom_sources || []), ...seeds.websites])).slice(0, 50)
+          };
+          jobWarnings.push(
+            `Direct websites seeded from approved-source discovery: companies=${seeds.companyNames.length}, websites=${seeds.websites.length}.`
+          );
+        } else {
+          jobWarnings.push("Direct websites had no approved-source company candidates to enrich.");
+        }
+      }
+
+      const execution = await executeSourceWithFallback(run.sourceId as SourceId, executionParsedQuery, maxResultsPerSource, {
         allowAutomatedIndexFallback: false
       });
       const quality = filterPrimaryLeadResults(execution.result.results);
@@ -738,14 +925,22 @@ export const processSearchJob = async (jobId: string) => {
       execution.result.extracted_results = quality.kept.length;
       execution.result.parse_status =
         quality.kept.length > 0 ? "success" : execution.result.parse_status === "skipped" ? "skipped" : "empty";
-      const aiEnriched = await enrichResultsWithAi(quality.kept, parsedQuery);
+      const aiEnriched = await enrichResultsWithAi(quality.kept, executionParsedQuery);
+      const candidateEnrichment = enrichResultsWithCompanyCandidates(aiEnriched);
+      if (candidateEnrichment.extractedCandidates > 0 || candidateEnrichment.rejectedCandidates > 0) {
+        execution.result.warnings.push(
+          `Candidate extraction: extracted=${candidateEnrichment.extractedCandidates}, rejected=${candidateEnrichment.rejectedCandidates}.`
+        );
+      }
+      const enrichedResults = candidateEnrichment.results;
       const resultPayloads: JobResultItem[] = [];
 
       let runImported = 0;
       let runRaw = 0;
       let runLow = 0;
+      let runPromoted = 0;
 
-      for (const result of aiEnriched) {
+      for (const result of enrichedResults) {
         const normalizedResult = withOriginMeta(result, execution.result.execution_mode);
         const persisted = await persistResult({
           jobId: job.id,
@@ -754,10 +949,11 @@ export const processSearchJob = async (jobId: string) => {
             ...normalizedResult,
             persistence_status: "logged"
           },
-          parsedQuery
+          parsedQuery: executionParsedQuery
         });
 
         if (persisted.persistence_status === "imported") runImported += 1;
+        if (persisted.persistence_status === "imported" || persisted.persistence_status === "duplicate") runPromoted += 1;
         if (persisted.persistence_status === "staged") runRaw += 1;
         if (persisted.persistence_status === "logged") {
           runRaw += 1;
@@ -771,6 +967,12 @@ export const processSearchJob = async (jobId: string) => {
           lead_id: persisted.lead_id,
           raw_lead_id: persisted.raw_lead_id
         });
+      }
+
+      if (runPromoted > 0 || runImported > 0 || runRaw > 0 || runLow > 0) {
+        execution.result.warnings.push(
+          `Persistence summary: promoted=${runPromoted}, imported=${runImported}, raw=${runRaw}, low=${runLow}.`
+        );
       }
 
       const runStatus = inferRunStatus(execution.result.status, execution.result.blocked);
@@ -846,6 +1048,9 @@ export const processSearchJob = async (jobId: string) => {
       importedLeads += runImported;
       savedRawLeads += runRaw;
       lowConfidenceDropped += runLow;
+      if (resultPayloads.length > 0) {
+        discoveredResultsForSeeds.push(...resultPayloads);
+      }
       jobWarnings.push(...execution.result.warnings.map((warning) => `${execution.result.sourceName}: ${warning}`));
 
       await prisma.searchJob.update({
@@ -922,7 +1127,11 @@ export const createSearchJob = async (input: CreateSearchJobInput): Promise<Crea
   const maxSources = Math.max(1, Math.min(input.maxSources || DEFAULT_MAX_SOURCES, 8));
   const maxResultsPerSource = Math.max(3, Math.min(input.maxResultsPerSource || DEFAULT_RESULTS_PER_SOURCE, 25));
   const selectionPlan = await planSourceSelection(parsedQuery, maxSources);
-  const recommendedSources = selectionPlan.selected;
+  const recommendedSources = [...selectionPlan.selected].sort((a, b) => {
+    const aDirect = a.source_id === "direct_websites" ? 1 : 0;
+    const bDirect = b.source_id === "direct_websites" ? 1 : 0;
+    return aDirect - bDirect;
+  });
   const selectedSources = recommendedSources.map((source) => source.source_id);
 
   const job = await prisma.searchJob.create({

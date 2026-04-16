@@ -25,6 +25,7 @@ type WhyMatchedCode =
 
 type LeadDiscoveryItem = {
   id: string;
+  discoveryStage: "strong" | "probable";
   leadId: string | null;
   dealId: string | null;
   company: string;
@@ -57,6 +58,7 @@ type LeadDiscoverySnapshot = {
   };
   totals: {
     readyLeads: number;
+    probableCompanies: number;
     hiddenReview: number;
     lowConfidence: number;
     imported: number;
@@ -98,7 +100,7 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
   const [countryFilter, setCountryFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
   const [productFilter, setProductFilter] = useState("");
-  const [confidenceFilter, setConfidenceFilter] = useState("65");
+  const [confidenceFilter, setConfidenceFilter] = useState("30");
 
   const [actionState, setActionState] = useState<Record<string, string>>({});
   const [outreachByLeadId, setOutreachByLeadId] = useState<Record<string, string>>({});
@@ -222,7 +224,7 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
       setCountryFilter("");
       setSourceFilter("");
       setProductFilter("");
-      setConfidenceFilter("65");
+      setConfidenceFilter("30");
     } catch (err) {
       setError(toOperatorSafeMessage(err, t("leadDiscovery.createError")));
     } finally {
@@ -402,16 +404,16 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
       {snapshot ? (
         <div className="grid gap-4 md:grid-cols-4">
           <Card>
-            <CardTitle>{t("leadDiscovery.readyLeads")}</CardTitle>
+            <CardTitle>{t("leadDiscovery.strongLeads")}</CardTitle>
             <p className="mt-3 text-2xl font-bold">{snapshot.totals.readyLeads}</p>
+          </Card>
+          <Card>
+            <CardTitle>{t("leadDiscovery.probableCompanies")}</CardTitle>
+            <p className="mt-3 text-2xl font-bold">{snapshot.totals.probableCompanies}</p>
           </Card>
           <Card>
             <CardTitle>{t("leadDiscovery.imported")}</CardTitle>
             <p className="mt-3 text-2xl font-bold">{snapshot.totals.imported}</p>
-          </Card>
-          <Card>
-            <CardTitle>{t("leadDiscovery.duplicates")}</CardTitle>
-            <p className="mt-3 text-2xl font-bold">{snapshot.totals.duplicates}</p>
           </Card>
           <Card>
             <CardTitle>{t("leadDiscovery.status")}</CardTitle>
@@ -426,9 +428,12 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
           {showNoCompanyResults ? (
             <p className="text-sm font-medium text-slate-700">{t("leadDiscovery.noCompanyResultsFound")}</p>
           ) : (
-            <div className="grid gap-3 text-sm text-slate-700 md:grid-cols-4">
+            <div className="grid gap-3 text-sm text-slate-700 md:grid-cols-5">
               <p>
                 {t("leadDiscovery.savedToLeadDatabase")}: <strong>{snapshot?.leads.length || 0}</strong>
+              </p>
+              <p>
+                {t("leadDiscovery.probableCompanies")}: <strong>{snapshot?.totals.probableCompanies || 0}</strong>
               </p>
               <p>
                 {t("leadDiscovery.savedToCompanies")}: <strong>{persistedSummary.companySavedCount}</strong>
@@ -492,6 +497,11 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
         </div>
       ) : (
         <div className="space-y-4">
+          {snapshot.totals.readyLeads === 0 && snapshot.totals.probableCompanies > 0 ? (
+            <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+              {t("leadDiscovery.showingProbableOnly")}
+            </p>
+          ) : null}
           {filteredLeads.map((lead) => (
             <Card key={lead.id} className="space-y-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
@@ -499,6 +509,9 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
                   <div className="flex flex-wrap items-center gap-2">
                     <h3 className="text-base font-semibold text-slate-900">{lead.company}</h3>
                     <Badge variant={roleVariant(lead.role)}>{t(`leadDiscovery.role.${lead.role}`)}</Badge>
+                    <Badge variant={lead.discoveryStage === "strong" ? "success" : "warning"}>
+                      {lead.discoveryStage === "strong" ? t("leadDiscovery.strongLead") : t("leadDiscovery.probableCandidate")}
+                    </Badge>
                     <Badge variant={confidenceVariant(lead.confidenceScore)}>
                       {t("leadDiscovery.confidence")} {lead.confidenceScore.toFixed(0)}%
                     </Badge>
