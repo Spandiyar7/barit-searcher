@@ -25,7 +25,7 @@ type WhyMatchedCode =
 
 type LeadDiscoveryItem = {
   id: string;
-  discoveryStage: "strong" | "probable";
+  discoveryStage: "strong" | "probable" | "other";
   leadId: string | null;
   dealId: string | null;
   company: string;
@@ -59,6 +59,7 @@ type LeadDiscoverySnapshot = {
   totals: {
     readyLeads: number;
     probableCompanies: number;
+    otherResults: number;
     hiddenReview: number;
     lowConfidence: number;
     imported: number;
@@ -209,7 +210,7 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
     try {
       setLoading(true);
       setError(null);
-      const response = await fetch("/api/market-intelligence/jobs", {
+      const response = await fetch("/api/lead-discovery/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -377,7 +378,10 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
   };
 
   const showNoCompanyResults =
-    persistedSummary && persistedSummary.companySavedCount === 0 && persistedSummary.leadSavedCount === 0;
+    persistedSummary &&
+    (snapshot?.leads.length || 0) === 0 &&
+    persistedSummary.companySavedCount === 0 &&
+    persistedSummary.leadSavedCount === 0;
   const isJobActive = snapshot ? isRunningStatus(snapshot.job.status) : false;
   const hasDiscoveryCandidates = Boolean(snapshot && snapshot.leads.length > 0);
 
@@ -420,7 +424,7 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
       ) : null}
 
       {snapshot ? (
-        <div className="grid gap-4 md:grid-cols-4">
+        <div className="grid gap-4 md:grid-cols-5">
           <Card>
             <CardTitle>{t("leadDiscovery.strongLeads")}</CardTitle>
             <p className="mt-3 text-2xl font-bold">{snapshot.totals.readyLeads}</p>
@@ -428,6 +432,10 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
           <Card>
             <CardTitle>{t("leadDiscovery.probableCompanies")}</CardTitle>
             <p className="mt-3 text-2xl font-bold">{snapshot.totals.probableCompanies}</p>
+          </Card>
+          <Card>
+            <CardTitle>{t("leadDiscovery.otherResults", "Other results")}</CardTitle>
+            <p className="mt-3 text-2xl font-bold">{snapshot.totals.otherResults}</p>
           </Card>
           <Card>
             <CardTitle>{t("leadDiscovery.imported")}</CardTitle>
@@ -525,6 +533,13 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
               {t("leadDiscovery.showingProbableOnly")}
             </p>
           ) : null}
+          {snapshot.totals.readyLeads === 0 &&
+          snapshot.totals.probableCompanies === 0 &&
+          snapshot.totals.otherResults > 0 ? (
+            <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+              {t("leadDiscovery.showingOtherResults", "Showing other market results while stronger matches are not available yet.")}
+            </p>
+          ) : null}
           {filteredLeads.map((lead) => (
             <Card key={lead.id} className="space-y-4">
               <div className="flex flex-wrap items-start justify-between gap-3">
@@ -532,8 +547,20 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
                   <div className="flex flex-wrap items-center gap-2">
                     <h3 className="text-base font-semibold text-slate-900">{lead.company}</h3>
                     <Badge variant={roleVariant(lead.role)}>{t(`leadDiscovery.role.${lead.role}`)}</Badge>
-                    <Badge variant={lead.discoveryStage === "strong" ? "success" : "warning"}>
-                      {lead.discoveryStage === "strong" ? t("leadDiscovery.strongLead") : t("leadDiscovery.probableCandidate")}
+                    <Badge
+                      variant={
+                        lead.discoveryStage === "strong"
+                          ? "success"
+                          : lead.discoveryStage === "probable"
+                            ? "warning"
+                            : "default"
+                      }
+                    >
+                      {lead.discoveryStage === "strong"
+                        ? t("leadDiscovery.strongLead")
+                        : lead.discoveryStage === "probable"
+                          ? t("leadDiscovery.probableCandidate")
+                          : t("leadDiscovery.otherResult", "Other result")}
                     </Badge>
                     <Badge variant={confidenceVariant(lead.confidenceScore)}>
                       {t("leadDiscovery.confidence")} {lead.confidenceScore.toFixed(0)}%

@@ -6,7 +6,7 @@ import { getSourcePerformanceDashboardData } from "@/lib/services/source-perform
 import { SOURCE_CATALOG } from "@/lib/services/market-intelligence/source-catalog";
 
 type DiscoveryRole = "buyer" | "supplier" | "importer" | "exporter" | "manufacturer" | "trader";
-type DiscoveryStage = "strong" | "probable";
+type DiscoveryStage = "strong" | "probable" | "other";
 type WhyMatchedCode =
   | "roleMatch"
   | "countryMatch"
@@ -53,6 +53,7 @@ export type LeadDiscoverySnapshot = {
   totals: {
     readyLeads: number;
     probableCompanies: number;
+    otherResults: number;
     hiddenReview: number;
     lowConfidence: number;
     imported: number;
@@ -287,6 +288,38 @@ const getWhyMatched = (payload: {
   return reasons.slice(0, 5);
 };
 
+const stagePriority = (stage: DiscoveryStage) => {
+  if (stage === "strong") return 3;
+  if (stage === "probable") return 2;
+  return 1;
+};
+
+const dedupeDiscoveryItems = (items: LeadDiscoveryItem[]) => {
+  const map = new Map<string, LeadDiscoveryItem>();
+
+  items.forEach((item) => {
+    const key = `${(item.sourceUrl || "").toLowerCase()}|${normalizeCompanyKey(item.company) || (item.product || "").toLowerCase()}`;
+    const existing = map.get(key);
+    if (!existing) {
+      map.set(key, item);
+      return;
+    }
+
+    const existingRank = stagePriority(existing.discoveryStage);
+    const currentRank = stagePriority(item.discoveryStage);
+    if (currentRank > existingRank) {
+      map.set(key, item);
+      return;
+    }
+
+    if (currentRank === existingRank && item.rankingScore > existing.rankingScore) {
+      map.set(key, item);
+    }
+  });
+
+  return Array.from(map.values());
+};
+
 export const getLeadDiscoverySnapshot = async (jobId: string): Promise<LeadDiscoverySnapshot> => {
   const snapshot = await getSearchJobSnapshot(jobId);
   const sourceQualityMap = await getSourceQualityMap();
@@ -295,6 +328,7 @@ export const getLeadDiscoverySnapshot = async (jobId: string): Promise<LeadDisco
   );
 
   const allResults = snapshot.results;
+  const rawSourceHits = allResults.length;
   const companySignalMap = new Map<string, { count: number; signalCount: number; sources: Set<string> }>();
 
   allResults.forEach((item) => {
@@ -343,7 +377,7 @@ export const getLeadDiscoverySnapshot = async (jobId: string): Promise<LeadDisco
 
   const parsed = snapshot.parsed_query;
 
-  const discoveryLeads: LeadDiscoveryItem[] = allResults
+  const mappedLeads: LeadDiscoveryItem[] = allResults
     .map((result) => {
       const linkedLead = (result.lead_id && leadById.get(result.lead_id)) || leadBySourceUrl.get(result.source_url) || null;
       const firstContact = linkedLead?.company?.contacts.find((item) => Boolean(item.email || item.phone || item.fullName)) || null;
@@ -415,7 +449,7 @@ export const getLeadDiscoverySnapshot = async (jobId: string): Promise<LeadDisco
 
       const probableCandidate =
         !strongCandidate &&
-        hasCompanyIdentity &&
+        (hasCompanyIdentity || Boolean(result.product) || Boolean(result.country || result.destination)) &&
         (confidence >= 0.2 ||
           sourceQuality >= 0.2 ||
           roleRelevance >= 0.35 ||
@@ -428,14 +462,33 @@ export const getLeadDiscoverySnapshot = async (jobId: string): Promise<LeadDisco
           result.persistence_status === "staged" ||
           result.persistence_status === "logged");
 
-      if (!strongCandidate && !probableCandidate) return null;
+      const businessSignal =
+        hasCompanyIdentity ||
+        Boolean(result.product) ||
+        Boolean(result.country || result.destination) ||
+        Boolean((result.description || "").trim().length > 24) ||
+        hasTradingSignal;
+
+      const obviousNonCompany =
+        !hasCompanyIdentity &&
+        NON_COMPANY_PATTERN.test(`${result.source_name || ""} ${result.description || ""}`) &&
+        !hasTradingSignal;
+
+      if (!strongCandidate && !probableCandidate && (!businessSignal || obviousNonCompany)) return null;
+
+      const discoveryStage: DiscoveryStage = strongCandidate ? "strong" : probableCandidate ? "probable" : "other";
+      const fallbackCompanyName =
+        companyName ||
+        inferCompanyFromHost(result.source_url) ||
+        `${result.source_name} ${(result.country || result.destination || "").trim()}`.trim() ||
+        "Unverified company";
 
       return {
         id: result.id,
-        discoveryStage: strongCandidate ? "strong" : "probable",
+        discoveryStage,
         leadId: linkedLead?.id || result.lead_id || null,
         dealId: linkedLead?.sourceDeal?.id || null,
-        company: companyName || "Unknown company",
+        company: fallbackCompanyName,
         country: linkedLead?.originCountry || result.country || result.destination || null,
         role,
         product: linkedLead?.product?.name || result.product || parsed.product || null,
@@ -465,14 +518,34 @@ export const getLeadDiscoverySnapshot = async (jobId: string): Promise<LeadDisco
     })
     .filter((item): item is LeadDiscoveryItem => Boolean(item));
 
+  const normalizedCount = mappedLeads.length;
+  const discoveryLeads = dedupeDiscoveryItems(mappedLeads);
+  const dedupedCount = discoveryLeads.length;
+
   discoveryLeads.sort((a, b) => {
-    const stageDelta = (b.discoveryStage === "strong" ? 1 : 0) - (a.discoveryStage === "strong" ? 1 : 0);
+    const stageDelta = stagePriority(b.discoveryStage) - stagePriority(a.discoveryStage);
     if (stageDelta !== 0) return stageDelta;
     return b.rankingScore - a.rankingScore || b.confidenceScore - a.confidenceScore;
   });
 
   const readyLeadsCount = discoveryLeads.filter((item) => item.discoveryStage === "strong").length;
   const probableCompaniesCount = discoveryLeads.filter((item) => item.discoveryStage === "probable").length;
+  const otherResultsCount = discoveryLeads.filter((item) => item.discoveryStage === "other").length;
+  const linkedPersistedLeads = discoveryLeads.filter((item) => Boolean(item.leadId)).length;
+
+  console.info("[lead-discovery] snapshot", {
+    query: snapshot.job.query,
+    jobId: snapshot.job.id,
+    freshSearchStarted: false,
+    rawSourceHits,
+    afterNormalize: normalizedCount,
+    afterDedupe: dedupedCount,
+    strong: readyLeadsCount,
+    probable: probableCompaniesCount,
+    other: otherResultsCount,
+    persistedLinkedLeads: linkedPersistedLeads,
+    cacheUsed: false
+  });
 
   return {
     job: {
@@ -486,6 +559,7 @@ export const getLeadDiscoverySnapshot = async (jobId: string): Promise<LeadDisco
     totals: {
       readyLeads: readyLeadsCount,
       probableCompanies: probableCompaniesCount,
+      otherResults: otherResultsCount,
       hiddenReview: snapshot.results.filter((item) => item.persistence_status === "staged").length,
       lowConfidence: snapshot.results.filter((item) => item.persistence_status === "logged").length,
       imported: snapshot.results.filter((item) => item.persistence_status === "imported").length,

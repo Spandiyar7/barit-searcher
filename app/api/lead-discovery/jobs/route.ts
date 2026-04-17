@@ -15,6 +15,14 @@ export async function POST(request: NextRequest) {
   try {
     const body = await request.json();
     const payload = marketIntelligenceCreateJobSchema.parse(body);
+    const customSources = parseCustomSources(payload.customSources);
+
+    console.info("[lead-discovery] incoming_query", {
+      query: payload.q,
+      country: payload.country || null,
+      intent: payload.intent || "auto",
+      customSourcesCount: customSources.length
+    });
 
     const data = await createSearchJob({
       query: payload.q,
@@ -22,8 +30,14 @@ export async function POST(request: NextRequest) {
       intent: payload.intent || null,
       maxSources: payload.maxSources,
       maxResultsPerSource: payload.maxResultsPerSource,
-      customSources: parseCustomSources(payload.customSources),
+      customSources,
       savedSearchId: payload.savedSearchId || null
+    });
+
+    console.info("[lead-discovery] fresh_search_started", {
+      query: payload.q,
+      jobId: data.job_id,
+      status: data.status
     });
 
     return apiOk(data);
