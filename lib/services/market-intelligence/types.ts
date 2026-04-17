@@ -262,6 +262,13 @@ export type SourceDiagnostic = {
     browser_fallback: number;
     unknown: number;
   };
+  raw_source_hits?: number;
+  company_candidates_extracted?: number;
+  candidates_persisted_company?: number;
+  candidates_persisted_lead?: number;
+  filtered_out_count?: number;
+  persistence_failed_count?: number;
+  drop_step?: "ok" | "no_source_hits" | "no_company_candidates" | "filtered_as_non_company" | "failed_persistence";
 };
 
 export type SourceExecutionTrace = {

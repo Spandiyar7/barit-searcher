@@ -751,6 +751,32 @@ export function MarketIntelligenceClient({ locale }: { locale: Locale }) {
                     {t("marketIntelligence.extractedCount")}: {source.extracted_results}
                   </p>
                   <p>
+                    {t("marketIntelligence.rawSourceHits", "Raw source hits")}: {source.raw_source_hits ?? "-"}
+                  </p>
+                  <p>
+                    {t("marketIntelligence.companyCandidatesExtracted", "Company candidates extracted")}:{" "}
+                    {source.company_candidates_extracted ?? "-"}
+                  </p>
+                  <p>
+                    {t("marketIntelligence.candidatesPersistedCompany", "Candidates persisted to Company")}:{" "}
+                    {source.candidates_persisted_company ?? "-"}
+                  </p>
+                  <p>
+                    {t("marketIntelligence.candidatesPersistedLead", "Candidates persisted to Lead")}:{" "}
+                    {source.candidates_persisted_lead ?? "-"}
+                  </p>
+                  <p>
+                    {t("marketIntelligence.filteredOutCount", "Filtered out count")}: {source.filtered_out_count ?? "-"}
+                  </p>
+                  <p>
+                    {t("marketIntelligence.persistenceFailedCount", "Persistence failed count")}:{" "}
+                    {source.persistence_failed_count ?? "-"}
+                  </p>
+                  <p>
+                    {t("marketIntelligence.dropStep", "Drop step")}:{" "}
+                    {source.drop_step ? t(`marketIntelligence.dropStep.${source.drop_step}`, source.drop_step) : "-"}
+                  </p>
+                  <p>
                     {t("marketIntelligence.antiBotRisk")}: {source.anti_bot_risk}
                   </p>
                   <p>

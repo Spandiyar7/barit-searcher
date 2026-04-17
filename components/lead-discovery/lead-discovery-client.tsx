@@ -68,6 +68,7 @@ type LeadDiscoverySnapshot = {
 };
 
 type ApiPayload<T> = { data?: T; error?: string };
+type CreateJobResponse = { job_id: string; status?: string };
 
 const roleVariant = (role: LeadDiscoveryRole) => {
   if (role === "buyer" || role === "importer") return "info" as const;
@@ -100,7 +101,7 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
   const [countryFilter, setCountryFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
   const [productFilter, setProductFilter] = useState("");
-  const [confidenceFilter, setConfidenceFilter] = useState("30");
+  const [confidenceFilter, setConfidenceFilter] = useState("0");
 
   const [actionState, setActionState] = useState<Record<string, string>>({});
   const [outreachByLeadId, setOutreachByLeadId] = useState<Record<string, string>>({});
@@ -194,7 +195,13 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
 
   const runDiscovery = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!query.trim()) {
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    const submittedQuery = String(formData.get("query") ?? query).trim();
+    const submittedCountry = String(formData.get("country") ?? country).trim();
+    const submittedIntent = String(formData.get("intent") ?? intent).trim();
+
+    if (!submittedQuery) {
       setError(t("leadDiscovery.queryRequired"));
       return;
     }
@@ -202,19 +209,22 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
     try {
       setLoading(true);
       setError(null);
-      const response = await fetch("/api/lead-discovery/jobs", {
+      const response = await fetch("/api/market-intelligence/jobs", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          q: query.trim(),
-          country: country.trim(),
-          intent: intent || undefined,
+          q: submittedQuery,
+          country: submittedCountry,
+          intent: submittedIntent || undefined,
           customSources: ""
         })
       });
-      const json = (await response.json().catch(() => ({}))) as ApiPayload<{ job_id: string }>;
+      const json = (await response.json().catch(() => ({}))) as ApiPayload<CreateJobResponse>;
       if (!response.ok || !json.data?.job_id) throw new Error(json.error || t("leadDiscovery.createError"));
 
+      setQuery(submittedQuery);
+      setCountry(submittedCountry);
+      setIntent(submittedIntent);
       setSnapshot(null);
       setJobId(json.data.job_id);
       setActionState({});
@@ -224,7 +234,7 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
       setCountryFilter("");
       setSourceFilter("");
       setProductFilter("");
-      setConfidenceFilter("30");
+      setConfidenceFilter("0");
     } catch (err) {
       setError(toOperatorSafeMessage(err, t("leadDiscovery.createError")));
     } finally {
@@ -368,19 +378,27 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
 
   const showNoCompanyResults =
     persistedSummary && persistedSummary.companySavedCount === 0 && persistedSummary.leadSavedCount === 0;
+  const isJobActive = snapshot ? isRunningStatus(snapshot.job.status) : false;
+  const hasDiscoveryCandidates = Boolean(snapshot && snapshot.leads.length > 0);
 
   return (
     <div className="space-y-6">
       <Card>
         <form className="grid gap-3 md:grid-cols-4" onSubmit={runDiscovery}>
           <Input
+            name="query"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder={t("leadDiscovery.queryPlaceholder")}
             className="md:col-span-2"
           />
-          <Input value={country} onChange={(event) => setCountry(event.target.value)} placeholder={t("leadDiscovery.country")} />
-          <Select value={intent} onChange={(event) => setIntent(event.target.value)}>
+          <Input
+            name="country"
+            value={country}
+            onChange={(event) => setCountry(event.target.value)}
+            placeholder={t("leadDiscovery.country")}
+          />
+          <Select name="intent" value={intent} onChange={(event) => setIntent(event.target.value)}>
             <option value="">{t("leadDiscovery.allIntents")}</option>
             <option value="buyers">{t("leadDiscovery.roleBuyer")}</option>
             <option value="suppliers">{t("leadDiscovery.roleSupplier")}</option>
@@ -486,9 +504,14 @@ export function LeadDiscoveryClient({ locale }: { locale: Locale }) {
 
       {!snapshot ? (
         <EmptyState title={t("leadDiscovery.emptyTitle")} description={t("leadDiscovery.emptyDescription")} />
+      ) : isJobActive && !hasDiscoveryCandidates ? (
+        <EmptyState title={t("leadDiscovery.running")} description={t("leadDiscovery.searchingNow")} />
       ) : filteredLeads.length === 0 ? (
         <div className="space-y-3">
-          <EmptyState title={t("leadDiscovery.noMatches")} description={t("leadDiscovery.noMatchesDescription")} />
+          <EmptyState
+            title={hasDiscoveryCandidates ? t("leadDiscovery.noMatches") : t("leadDiscovery.noCompanyResultsFound")}
+            description={hasDiscoveryCandidates ? t("leadDiscovery.noMatchesDescription") : t("leadDiscovery.trySpecific")}
+          />
           <div className="flex justify-center">
             <Link href="/market-intelligence">
               <Button variant="secondary">{t("leadDiscovery.openFallbackSearch")}</Button>

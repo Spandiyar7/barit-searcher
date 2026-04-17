@@ -33,7 +33,7 @@ import type {
   SourceStatus
 } from "./types";
 
-const DEFAULT_MAX_SOURCES = 5;
+const DEFAULT_MAX_SOURCES = 7;
 const DEFAULT_RESULTS_PER_SOURCE = 12;
 const MEDIUM_CONFIDENCE_THRESHOLD = 0.58;
 const MAX_WARNINGS = 60;
@@ -72,6 +72,8 @@ const COMPANY_SUFFIX_PATTERN =
   /\b([a-z0-9][a-z0-9&.,'()\- ]{1,90}\s(?:llc|ltd|limited|inc|corp|co\.?|company|group|gmbh|sarl|fze|dmcc|pte|ag|bv|srl))\b/gi;
 const QUOTED_COMPANY_PATTERN = /["“”]([^"“”]{3,120})["“”]/g;
 const EXPLICIT_COMPANY_PATTERN = /\b(?:company|supplier|buyer|manufacturer|exporter|importer|distributor)\s*[:\-]\s*([^\n|,;]{3,120})/gi;
+const BUSINESS_NAME_PATTERN =
+  /\b([a-z0-9][a-z0-9&.,'()\- ]{2,90}\s(?:trading|foods?|agro|imports?|exports?|distribution|distributors?|wholesale|supplies?|enterprise|enterprises|holdings?))\b/gi;
 const COMPANY_SEED_BLOCKED_HOSTS = [
   "kompass.com",
   "europages.com",
@@ -91,6 +93,37 @@ const COMPANY_SEED_BLOCKED_HOSTS = [
   "reddit.com",
   "quora.com"
 ];
+const GENERIC_COMPANY_TOKENS = new Set([
+  "wholesale",
+  "food",
+  "foods",
+  "sugar",
+  "import",
+  "imports",
+  "importer",
+  "importers",
+  "export",
+  "exports",
+  "exporter",
+  "exporters",
+  "supplier",
+  "suppliers",
+  "buyer",
+  "buyers",
+  "manufacturer",
+  "manufacturers",
+  "distributor",
+  "distributors",
+  "company",
+  "companies",
+  "trader",
+  "trading",
+  "uzbekistan",
+  "turkey",
+  "india",
+  "china",
+  "kazakhstan"
+]);
 
 const cleanCandidateCompany = (value: string) =>
   normalizeCompanyName(
@@ -99,6 +132,17 @@ const cleanCandidateCompany = (value: string) =>
       .replace(/[\s\-–—|,:;]+$/, "")
       .replace(/\s+/g, " ")
   );
+
+const isBusinessLikeCandidate = (value: string) => {
+  if (!hasValidCompanyName(value)) return false;
+  const tokens = value
+    .toLowerCase()
+    .split(/[^a-z0-9]+/g)
+    .filter(Boolean);
+  if (tokens.length === 0) return false;
+  const meaningful = tokens.filter((token) => !GENERIC_COMPANY_TOKENS.has(token) && token.length > 1);
+  return meaningful.length > 0;
+};
 
 const extractCompanyCandidatesFromText = (text: string) => {
   const normalized = text.trim();
@@ -122,8 +166,13 @@ const extractCompanyCandidatesFromText = (text: string) => {
   for (const match of normalized.matchAll(COMPANY_SUFFIX_PATTERN)) {
     applyMatch(match[1] || "");
   }
+  for (const match of normalized.matchAll(BUSINESS_NAME_PATTERN)) {
+    applyMatch(match[1] || "");
+  }
 
-  return Array.from(candidates).slice(0, 6);
+  return Array.from(candidates)
+    .filter((candidate) => isBusinessLikeCandidate(candidate))
+    .slice(0, 8);
 };
 
 const toRootUrl = (value: string) => {
@@ -150,22 +199,31 @@ const isLikelyCompanyWebsiteForSeed = (value: string) => {
   return !COMPANY_SEED_BLOCKED_HOSTS.some((hint) => host.includes(hint));
 };
 
+const inferCompanyFromSourceUrlHost = (sourceUrl: string) => {
+  if (!isLikelyCompanyWebsiteForSeed(sourceUrl)) return null;
+  const host = toHost(sourceUrl);
+  if (!host) return null;
+  const base = cleanCandidateCompany(host.split(".")[0]?.replace(/[-_]+/g, " ") || "");
+  if (!base || !isBusinessLikeCandidate(base)) return null;
+  return base;
+};
+
 const enrichResultsWithCompanyCandidates = (results: NormalizedMarketResult[]) => {
   let extractedCandidates = 0;
-  let rejectedCandidates = 0;
+  let unresolvedCandidates = 0;
 
   const enriched = results.map((item) => {
-    if (hasValidCompanyName(item.company)) return item;
-
-    const candidates = extractCompanyCandidatesFromText(`${item.description || ""}\n${item.raw_text || ""}`);
-    if (candidates.length === 0) {
-      rejectedCandidates += 1;
-      return item;
+    if (isBusinessLikeCandidate(cleanCandidateCompany(item.company || ""))) {
+      return {
+        ...item,
+        company: cleanCandidateCompany(item.company || "")
+      };
     }
 
-    const candidate = candidates[0];
-    if (!hasValidCompanyName(candidate)) {
-      rejectedCandidates += 1;
+    const candidates = extractCompanyCandidatesFromText(`${item.description || ""}\n${item.raw_text || ""}`);
+    const candidate = candidates[0] || inferCompanyFromSourceUrlHost(item.source_url);
+    if (!candidate || !isBusinessLikeCandidate(candidate)) {
+      unresolvedCandidates += 1;
       return item;
     }
 
@@ -183,7 +241,55 @@ const enrichResultsWithCompanyCandidates = (results: NormalizedMarketResult[]) =
   return {
     results: enriched,
     extractedCandidates,
-    rejectedCandidates
+    unresolvedCandidates
+  };
+};
+
+const buildProbableCompanyFallbackResults = (payload: {
+  sourceResults: NormalizedMarketResult[];
+  parsedQuery: ParsedQuery;
+}) => {
+  const mapped = new Map<string, NormalizedMarketResult>();
+  let extractedCandidates = 0;
+  let filteredAsNonCompany = 0;
+
+  payload.sourceResults.forEach((item) => {
+    const candidatePool = [
+      cleanCandidateCompany(item.company || ""),
+      ...extractCompanyCandidatesFromText(`${item.description || ""}\n${item.raw_text || ""}`),
+      inferCompanyFromSourceUrlHost(item.source_url) || ""
+    ]
+      .map((entry) => cleanCandidateCompany(entry))
+      .filter(Boolean);
+
+    const chosen = candidatePool.find((entry) => isBusinessLikeCandidate(entry));
+    if (!chosen) {
+      filteredAsNonCompany += 1;
+      return;
+    }
+
+    extractedCandidates += 1;
+    const dedupeKey = `${item.source_url.toLowerCase()}|${chosen.toLowerCase()}`;
+    const candidateResult: NormalizedMarketResult = {
+      ...item,
+      company: chosen,
+      result_type: item.result_type || "company_candidate",
+      description: item.description.includes(chosen) ? item.description : `${chosen} • ${item.description}`,
+      confidence_score: Number(Math.max(item.confidence_score || 0.35, 0.43).toFixed(2)),
+      relevance_score: Number(Math.max(item.relevance_score || item.confidence_score || 0.35, 0.45).toFixed(2)),
+      country: item.country || payload.parsedQuery.target_country_or_region || null
+    };
+
+    const existing = mapped.get(dedupeKey);
+    if (!existing || candidateResult.confidence_score > existing.confidence_score) {
+      mapped.set(dedupeKey, candidateResult);
+    }
+  });
+
+  return {
+    results: Array.from(mapped.values()).slice(0, 20),
+    extractedCandidates,
+    filteredAsNonCompany
   };
 };
 
@@ -434,7 +540,10 @@ const persistResult = async (input: {
   if (!normalizedSourceUrl) {
     return {
       persistence_status: "logged" as const,
-      persistence_message: "Missing source URL"
+      persistence_message: "Missing source URL",
+      lead_persisted: false,
+      company_persisted: false,
+      persistence_failed: true
     };
   }
 
@@ -563,7 +672,10 @@ const persistResult = async (input: {
       persistence_status: "duplicate" as const,
       persistence_message: "Lead already exists",
       lead_id: matchedLead.leadId,
-      raw_lead_id: stagedRawLead.id
+      raw_lead_id: stagedRawLead.id,
+      lead_persisted: true,
+      company_persisted: hasValidCompanyName(resultForPersistence.company),
+      persistence_failed: false
     };
   }
 
@@ -585,7 +697,10 @@ const persistResult = async (input: {
       persistence_status: "duplicate" as const,
       persistence_message: "Matched existing imported lead",
       lead_id: stagedRawLead.leadId,
-      raw_lead_id: stagedRawLead.id
+      raw_lead_id: stagedRawLead.id,
+      lead_persisted: true,
+      company_persisted: hasValidCompanyName(resultForPersistence.company),
+      persistence_failed: false
     };
   }
 
@@ -614,13 +729,19 @@ const persistResult = async (input: {
         persistence_status: imported.status === "imported" ? ("imported" as const) : ("duplicate" as const),
         persistence_message: imported.message,
         lead_id: imported.leadId,
-        raw_lead_id: stagedRawLead.id
+        raw_lead_id: stagedRawLead.id,
+        lead_persisted: true,
+        company_persisted: Boolean(imported.companyId) || hasValidCompanyName(resultForPersistence.company),
+        persistence_failed: false
       };
     } catch {
       return {
         persistence_status: relevance >= MEDIUM_CONFIDENCE_THRESHOLD ? ("staged" as const) : ("logged" as const),
         persistence_message: "Saved to raw market leads",
-        raw_lead_id: stagedRawLead.id
+        raw_lead_id: stagedRawLead.id,
+        lead_persisted: false,
+        company_persisted: false,
+        persistence_failed: true
       };
     }
   }
@@ -629,14 +750,20 @@ const persistResult = async (input: {
     return {
       persistence_status: "staged" as const,
       persistence_message: "Saved to raw market leads",
-      raw_lead_id: stagedRawLead.id
+      raw_lead_id: stagedRawLead.id,
+      lead_persisted: false,
+      company_persisted: false,
+      persistence_failed: false
     };
   }
 
   return {
     persistence_status: "logged" as const,
     persistence_message: "Saved to raw market leads (low confidence)",
-    raw_lead_id: stagedRawLead.id
+    raw_lead_id: stagedRawLead.id,
+    lead_persisted: false,
+    company_persisted: false,
+    persistence_failed: false
   };
 };
 
@@ -915,7 +1042,10 @@ export const processSearchJob = async (jobId: string) => {
       const execution = await executeSourceWithFallback(run.sourceId as SourceId, executionParsedQuery, maxResultsPerSource, {
         allowAutomatedIndexFallback: false
       });
-      const quality = filterPrimaryLeadResults(execution.result.results);
+      const sourceResultsBeforeQuality = execution.result.results;
+      const rawSourceHits = sourceResultsBeforeQuality.length;
+      const quality = filterPrimaryLeadResults(sourceResultsBeforeQuality);
+      let filteredOutCount = quality.rejected.length;
       if (quality.rejected.length > 0) {
         execution.result.warnings.push(
           `Excluded ${quality.rejected.length} media/news-like records from primary lead discovery.`
@@ -925,20 +1055,55 @@ export const processSearchJob = async (jobId: string) => {
       execution.result.extracted_results = quality.kept.length;
       execution.result.parse_status =
         quality.kept.length > 0 ? "success" : execution.result.parse_status === "skipped" ? "skipped" : "empty";
-      const aiEnriched = await enrichResultsWithAi(quality.kept, executionParsedQuery);
-      const candidateEnrichment = enrichResultsWithCompanyCandidates(aiEnriched);
-      if (candidateEnrichment.extractedCandidates > 0 || candidateEnrichment.rejectedCandidates > 0) {
+      let aiEnriched = await enrichResultsWithAi(quality.kept, executionParsedQuery);
+      let candidateEnrichment = enrichResultsWithCompanyCandidates(aiEnriched);
+      let companyCandidatesExtracted = candidateEnrichment.extractedCandidates;
+      let filteredAsNonCompany = candidateEnrichment.unresolvedCandidates;
+      const hasBusinessCompany = candidateEnrichment.results.some((item) =>
+        isBusinessLikeCandidate(cleanCandidateCompany(item.company || ""))
+      );
+
+      if (!hasBusinessCompany && rawSourceHits > 0) {
+        const fallbackCandidates = buildProbableCompanyFallbackResults({
+          sourceResults: sourceResultsBeforeQuality,
+          parsedQuery: executionParsedQuery
+        });
+        companyCandidatesExtracted += fallbackCandidates.extractedCandidates;
+        filteredAsNonCompany += fallbackCandidates.filteredAsNonCompany;
+        filteredOutCount += fallbackCandidates.filteredAsNonCompany;
+        if (fallbackCandidates.results.length > 0) {
+          execution.result.warnings.push(
+            `Approved-source text/card fallback produced ${fallbackCandidates.results.length} probable company candidates.`
+          );
+          aiEnriched = await enrichResultsWithAi(fallbackCandidates.results, executionParsedQuery);
+          candidateEnrichment = enrichResultsWithCompanyCandidates(aiEnriched);
+          companyCandidatesExtracted += candidateEnrichment.extractedCandidates;
+          filteredAsNonCompany += candidateEnrichment.unresolvedCandidates;
+        }
+      }
+
+      if (companyCandidatesExtracted > 0 || filteredAsNonCompany > 0) {
         execution.result.warnings.push(
-          `Candidate extraction: extracted=${candidateEnrichment.extractedCandidates}, rejected=${candidateEnrichment.rejectedCandidates}.`
+          `Candidate extraction: extracted=${companyCandidatesExtracted}, filtered_non_company=${filteredAsNonCompany}.`
         );
       }
       const enrichedResults = candidateEnrichment.results;
+      execution.result.extracted_results = enrichedResults.length;
+      if (enrichedResults.length > 0) {
+        execution.result.parse_status = "success";
+        if (execution.result.status !== "blocked") {
+          execution.result.status = "ok";
+        }
+      }
       const resultPayloads: JobResultItem[] = [];
 
       let runImported = 0;
       let runRaw = 0;
       let runLow = 0;
       let runPromoted = 0;
+      let runPersistedLead = 0;
+      let runPersistedCompany = 0;
+      let runPersistenceFailed = 0;
 
       for (const result of enrichedResults) {
         const normalizedResult = withOriginMeta(result, execution.result.execution_mode);
@@ -954,6 +1119,9 @@ export const processSearchJob = async (jobId: string) => {
 
         if (persisted.persistence_status === "imported") runImported += 1;
         if (persisted.persistence_status === "imported" || persisted.persistence_status === "duplicate") runPromoted += 1;
+        if (persisted.lead_persisted) runPersistedLead += 1;
+        if (persisted.company_persisted) runPersistedCompany += 1;
+        if (persisted.persistence_failed) runPersistenceFailed += 1;
         if (persisted.persistence_status === "staged") runRaw += 1;
         if (persisted.persistence_status === "logged") {
           runRaw += 1;
@@ -971,8 +1139,24 @@ export const processSearchJob = async (jobId: string) => {
 
       if (runPromoted > 0 || runImported > 0 || runRaw > 0 || runLow > 0) {
         execution.result.warnings.push(
-          `Persistence summary: promoted=${runPromoted}, imported=${runImported}, raw=${runRaw}, low=${runLow}.`
+          `Persistence summary: promoted=${runPromoted}, imported=${runImported}, raw=${runRaw}, low=${runLow}, persisted_company=${runPersistedCompany}, persisted_lead=${runPersistedLead}, failed=${runPersistenceFailed}.`
         );
+      }
+
+      const dropStep =
+        resultPayloads.length > 0
+          ? "ok"
+          : rawSourceHits === 0
+            ? "no_source_hits"
+            : filteredAsNonCompany > 0 && companyCandidatesExtracted === 0
+                ? "filtered_as_non_company"
+                : companyCandidatesExtracted === 0
+                  ? "no_company_candidates"
+                  : runPersistenceFailed > 0 && runPersistedLead === 0
+                  ? "failed_persistence"
+                  : "no_company_candidates";
+      if (dropStep !== "ok") {
+        execution.result.warnings.push(`drop_step:${dropStep}`);
       }
 
       const runStatus = inferRunStatus(execution.result.status, execution.result.blocked);
@@ -1005,6 +1189,13 @@ export const processSearchJob = async (jobId: string) => {
         parse_status: execution.result.parse_status,
         extracted_results: execution.result.extracted_results,
         blocked: execution.result.blocked,
+        raw_source_hits: rawSourceHits,
+        company_candidates_extracted: companyCandidatesExtracted,
+        candidates_persisted_company: runPersistedCompany,
+        candidates_persisted_lead: runPersistedLead,
+        filtered_out_count: filteredOutCount,
+        persistence_failed_count: runPersistenceFailed,
+        drop_step: dropStep,
         selection_reason: recommendation?.reason,
         warnings: execution.result.warnings,
         open_source_url: execution.result.fetchedUrls[0] || null,

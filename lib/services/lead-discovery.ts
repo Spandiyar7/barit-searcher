@@ -105,13 +105,81 @@ const normalizeCompanyKey = (value: string | null | undefined) => {
 
 const NON_COMPANY_PATTERN =
   /\b(news|blog|article|media|press|forum|wikipedia|reddit|quora|linkedin|facebook|instagram|youtube|x\.com|twitter)\b/i;
+const COMPANY_HOST_BLOCKLIST = [
+  "kompass.com",
+  "europages.com",
+  "alibaba.com",
+  "tradekey.com",
+  "tradewheel.com",
+  "go4worldbusiness.com",
+  "ec21.com",
+  "exporthub.com",
+  "google.com",
+  "bing.com",
+  "duckduckgo.com",
+  "yahoo.com",
+  "facebook.com",
+  "instagram.com",
+  "linkedin.com",
+  "x.com",
+  "youtube.com",
+  "wikipedia.org",
+  "reddit.com",
+  "quora.com"
+];
+const COMPANY_NAME_PATTERN =
+  /\b([a-z0-9][a-z0-9&.,'()\- ]{2,90}\s(?:llc|ltd|limited|inc|corp|co\.?|company|group|gmbh|sarl|fze|dmcc|pte|ag|bv|srl|trading|foods?|agro|imports?|exports?|distribution|distributors?|supplies?|enterprise|enterprises|holdings?))\b/i;
+
+const cleanCompanyName = (value: string | null | undefined) => (value || "").trim().replace(/\s+/g, " ");
 
 const isLikelyCompanyIdentity = (value: string | null | undefined) => {
-  const normalized = (value || "").trim();
+  const normalized = cleanCompanyName(value);
   if (!normalized || normalized.length < 2) return false;
   if (/^(unknown|n\/a|na|none|null|anonymous)(\s|$)/i.test(normalized)) return false;
   if (NON_COMPANY_PATTERN.test(normalized)) return false;
   return true;
+};
+
+const toHost = (url: string | null | undefined) => {
+  const source = (url || "").trim();
+  if (!source) return "";
+  try {
+    return new URL(source).hostname.replace(/^www\./i, "").toLowerCase();
+  } catch {
+    return "";
+  }
+};
+
+const inferCompanyFromHost = (url: string | null | undefined) => {
+  const host = toHost(url);
+  if (!host) return null;
+  if (COMPANY_HOST_BLOCKLIST.some((entry) => host.includes(entry))) return null;
+  const base = cleanCompanyName(host.split(".")[0]?.replace(/[-_]+/g, " ") || "");
+  return isLikelyCompanyIdentity(base) ? base : null;
+};
+
+const inferCompanyFromText = (value: string | null | undefined) => {
+  const text = (value || "").trim();
+  if (!text) return null;
+  const match = text.match(COMPANY_NAME_PATTERN);
+  if (!match?.[1]) return null;
+  const candidate = cleanCompanyName(match[1]);
+  return isLikelyCompanyIdentity(candidate) ? candidate : null;
+};
+
+const resolveDiscoveryCompanyName = (payload: {
+  company?: string | null;
+  sourceUrl?: string | null;
+  description?: string | null;
+  rawText?: string | null;
+}) => {
+  const direct = cleanCompanyName(payload.company);
+  if (isLikelyCompanyIdentity(direct)) return direct;
+  const fromText = inferCompanyFromText(`${payload.description || ""}\n${payload.rawText || ""}`);
+  if (fromText) return fromText;
+  const fromHost = inferCompanyFromHost(payload.sourceUrl);
+  if (fromHost) return fromHost;
+  return null;
 };
 
 const isTradingSignalResult = (result: JobResultItem) => {
@@ -162,16 +230,20 @@ const buildNextAction = (result: JobResultItem, role: DiscoveryRole) => {
 };
 
 const getSourceQualityMap = async () => {
-  const perf = await getSourcePerformanceDashboardData();
   const map = new Map<string, number>();
-  perf.rows.forEach((row) => {
-    const score =
-      row.fetchSuccessRate * 0.25 +
-      row.parseSuccessRate * 0.25 +
-      row.successRate * 0.25 +
-      row.importedLeadRate * 0.25;
-    map.set(row.sourceName.toLowerCase(), Math.max(0.1, Math.min(1, score / 100)));
-  });
+  try {
+    const perf = await getSourcePerformanceDashboardData();
+    perf.rows.forEach((row) => {
+      const score =
+        row.fetchSuccessRate * 0.25 +
+        row.parseSuccessRate * 0.25 +
+        row.successRate * 0.25 +
+        row.importedLeadRate * 0.25;
+      map.set(row.sourceName.toLowerCase(), Math.max(0.1, Math.min(1, score / 100)));
+    });
+  } catch {
+    // Discovery should stay usable even if source performance metrics are temporarily unavailable.
+  }
   return map;
 };
 
@@ -226,7 +298,14 @@ export const getLeadDiscoverySnapshot = async (jobId: string): Promise<LeadDisco
   const companySignalMap = new Map<string, { count: number; signalCount: number; sources: Set<string> }>();
 
   allResults.forEach((item) => {
-    const key = normalizeCompanyKey(item.company);
+    const key = normalizeCompanyKey(
+      resolveDiscoveryCompanyName({
+        company: item.company,
+        sourceUrl: item.source_url,
+        description: item.description,
+        rawText: item.raw_text
+      })
+    );
     if (!key) return;
     const existing = companySignalMap.get(key) || { count: 0, signalCount: 0, sources: new Set<string>() };
     existing.count += 1;
@@ -266,110 +345,125 @@ export const getLeadDiscoverySnapshot = async (jobId: string): Promise<LeadDisco
 
   const discoveryLeads: LeadDiscoveryItem[] = allResults
     .map((result) => {
-    const linkedLead = (result.lead_id && leadById.get(result.lead_id)) || leadBySourceUrl.get(result.source_url) || null;
-    const firstContact = linkedLead?.company?.contacts.find((item) => Boolean(item.email || item.phone || item.fullName)) || null;
+      const linkedLead = (result.lead_id && leadById.get(result.lead_id)) || leadBySourceUrl.get(result.source_url) || null;
+      const firstContact = linkedLead?.company?.contacts.find((item) => Boolean(item.email || item.phone || item.fullName)) || null;
 
-    const role = inferRole(result, linkedLead?.leadType);
-    const confidence = Math.max(0.05, Math.min(0.99, result.relevance_score || result.confidence_score || 0.5));
-    const sourceQuality = sourceQualityMap.get(result.source_name.toLowerCase()) || 0.4;
-    const sourceGroup = sourceGroupByName.get(result.source_name.toLowerCase()) || "rfq_platforms";
-    const companyKey = normalizeCompanyKey(linkedLead?.company?.name || result.company);
-    const companySignals = companySignalMap.get(companyKey) || { count: 0, signalCount: 0, sources: new Set<string>() };
-    const hasTradingSignal = isTradingSignalResult(result) || companySignals.signalCount > 0;
-    const rfqOnly = isRfQOnlyResult(result) && sourceGroup === "rfq_platforms";
-    const repeatedSignals = companySignals.count >= 2;
-    const multiSource = companySignals.sources.size >= 2;
+      const role = inferRole(result, linkedLead?.leadType);
+      const confidence = Math.max(0.05, Math.min(0.99, result.relevance_score || result.confidence_score || 0.5));
+      const sourceQuality = sourceQualityMap.get(result.source_name.toLowerCase()) || 0.4;
+      const sourceGroup = sourceGroupByName.get(result.source_name.toLowerCase()) || "rfq_platforms";
+      const resolvedCompanyName = resolveDiscoveryCompanyName({
+        company: linkedLead?.company?.name || result.company,
+        sourceUrl: result.source_url,
+        description: result.description,
+        rawText: result.raw_text
+      });
+      const companyKey = normalizeCompanyKey(resolvedCompanyName);
+      const companySignals = companySignalMap.get(companyKey) || { count: 0, signalCount: 0, sources: new Set<string>() };
+      const hasTradingSignal = isTradingSignalResult(result) || companySignals.signalCount > 0;
+      const rfqOnly = isRfQOnlyResult(result) && sourceGroup === "rfq_platforms";
+      const repeatedSignals = companySignals.count >= 2;
+      const multiSource = companySignals.sources.size >= 2;
 
-    const enrichmentScore = getEnrichmentScore({
-      hasCompany: Boolean(linkedLead?.company?.name || result.company),
-      hasWebsite: Boolean(linkedLead?.company?.website),
-      hasDescription: Boolean(linkedLead?.company?.description),
-      hasContactName: Boolean(firstContact?.fullName || result.contact_name),
-      hasContactEmail: Boolean(firstContact?.email),
-      hasContactPhone: Boolean(firstContact?.phone)
-    });
+      const enrichmentScore = getEnrichmentScore({
+        hasCompany: Boolean(linkedLead?.company?.name || result.company),
+        hasWebsite: Boolean(linkedLead?.company?.website),
+        hasDescription: Boolean(linkedLead?.company?.description),
+        hasContactName: Boolean(firstContact?.fullName || result.contact_name),
+        hasContactEmail: Boolean(firstContact?.email),
+        hasContactPhone: Boolean(firstContact?.phone)
+      });
 
-    const freshnessDate = parsePostedDate(result.posted_date) || linkedLead?.publishedAt || linkedLead?.createdAt || new Date();
-    const freshness = getFreshnessScore(freshnessDate);
-    const roleRelevance = getRoleRelevance(parsed.intent, role);
-    const companyName = linkedLead?.company?.name || result.company;
-    const hasCompanyIdentity = isLikelyCompanyIdentity(companyName);
-    const hasContactData = Boolean(firstContact?.email || firstContact?.phone || result.contact_name);
+      const freshnessDate = parsePostedDate(result.posted_date) || linkedLead?.publishedAt || linkedLead?.createdAt || new Date();
+      const freshness = getFreshnessScore(freshnessDate);
+      const roleRelevance = getRoleRelevance(parsed.intent, role);
+      const companyName = resolvedCompanyName || linkedLead?.company?.name || result.company;
+      const hasCompanyIdentity = isLikelyCompanyIdentity(companyName);
+      const hasContactData = Boolean(firstContact?.email || firstContact?.phone || firstContact?.fullName || result.contact_name);
 
-    const ranking =
-      confidence * 0.34 +
-      sourceQuality * 0.17 +
-      enrichmentScore * 0.18 +
-      freshness * 0.1 +
-      roleRelevance * 0.1 +
-      (hasTradingSignal ? 0.14 : 0) +
-      (repeatedSignals ? 0.07 : 0) +
-      (multiSource ? 0.07 : 0) -
-      (rfqOnly ? 0.16 : 0) -
-      (hasCompanyIdentity ? 0 : 0.09) -
-      (hasContactData ? 0 : 0.07);
+      const ranking =
+        confidence * 0.34 +
+        sourceQuality * 0.17 +
+        enrichmentScore * 0.18 +
+        freshness * 0.1 +
+        roleRelevance * 0.1 +
+        (hasTradingSignal ? 0.14 : 0) +
+        (repeatedSignals ? 0.07 : 0) +
+        (multiSource ? 0.07 : 0) -
+        (rfqOnly ? 0.16 : 0) -
+        (hasCompanyIdentity ? 0 : 0.09) -
+        (hasContactData ? 0 : 0.07);
 
-    const countryText = `${result.country || ""} ${result.destination || ""}`.toLowerCase();
-    const countryMatched = Boolean(parsed.target_country_or_region && countryText.includes(parsed.target_country_or_region.toLowerCase()));
-    const productText = `${result.product || ""} ${result.description || ""}`.toLowerCase();
-    const productMatched = Boolean(parsed.product && productText.includes(parsed.product.toLowerCase()));
-    const strongCandidate =
-      (result.persistence_status === "imported" || result.persistence_status === "duplicate") &&
-      confidence >= 0.58 &&
-      sourceQuality >= 0.25 &&
-      !rfqOnly &&
-      hasCompanyIdentity &&
-      (hasTradingSignal || repeatedSignals || multiSource || roleRelevance >= 0.72 || enrichmentScore >= 0.25);
+      const countryText = `${result.country || ""} ${result.destination || ""}`.toLowerCase();
+      const countryMatched = Boolean(
+        parsed.target_country_or_region && countryText.includes(parsed.target_country_or_region.toLowerCase())
+      );
+      const productText = `${result.product || ""} ${result.description || ""}`.toLowerCase();
+      const productMatched = Boolean(parsed.product && productText.includes(parsed.product.toLowerCase()));
+      const promotedByPipeline = result.persistence_status === "imported" || result.persistence_status === "duplicate";
+      const strongCandidate =
+        hasCompanyIdentity &&
+        !rfqOnly &&
+        (promotedByPipeline ||
+          (confidence >= 0.62 &&
+            (hasTradingSignal ||
+              repeatedSignals ||
+              multiSource ||
+              roleRelevance >= 0.68 ||
+              enrichmentScore >= 0.22 ||
+              countryMatched)));
 
-    const probableCandidate =
-      !strongCandidate &&
-      hasCompanyIdentity &&
-      confidence >= 0.38 &&
-      sourceQuality >= 0.18 &&
-      (hasTradingSignal ||
-        repeatedSignals ||
-        multiSource ||
-        roleRelevance >= 0.55 ||
-        enrichmentScore >= 0.12 ||
-        result.persistence_status === "staged" ||
-        result.persistence_status === "logged");
+      const probableCandidate =
+        !strongCandidate &&
+        hasCompanyIdentity &&
+        (confidence >= 0.2 ||
+          sourceQuality >= 0.2 ||
+          roleRelevance >= 0.35 ||
+          countryMatched ||
+          productMatched ||
+          enrichmentScore >= 0.08 ||
+          hasTradingSignal ||
+          repeatedSignals ||
+          multiSource ||
+          result.persistence_status === "staged" ||
+          result.persistence_status === "logged");
 
-    if (!strongCandidate && !probableCandidate) return null;
+      if (!strongCandidate && !probableCandidate) return null;
 
-    return {
-      id: result.id,
-      discoveryStage: strongCandidate ? "strong" : "probable",
-      leadId: linkedLead?.id || result.lead_id || null,
-      dealId: linkedLead?.sourceDeal?.id || null,
-      company: companyName || "Unknown company",
-      country: linkedLead?.originCountry || result.country || result.destination || null,
-      role,
-      product: linkedLead?.product?.name || result.product || parsed.product || null,
-      confidenceScore: Number((confidence * 100).toFixed(2)),
-      rankingScore: Number((Math.max(0.01, Math.min(0.99, ranking)) * 100).toFixed(2)),
-      sourceName: result.source_name,
-      sourceUrl: result.source_url,
-      contactName: firstContact?.fullName || result.contact_name || null,
-      contactEmail: firstContact?.email || null,
-      contactPhone: firstContact?.phone || null,
-      aiExplanation: buildAiExplanation(result, role),
-      nextAction: buildNextAction(result, role),
-      whyMatched: getWhyMatched({
-        roleRelevance,
-        countryMatched,
-        productMatched,
-        enrichmentScore,
-        sourceQuality,
-        confidence,
-        repeatedSignals,
-        multiSource
-      }),
-      status: linkedLead?.status || "UNSAVED",
-      createdAt: freshnessDate.toISOString(),
-      rawResult: result
-    };
-  })
-  .filter((item): item is LeadDiscoveryItem => Boolean(item));
+      return {
+        id: result.id,
+        discoveryStage: strongCandidate ? "strong" : "probable",
+        leadId: linkedLead?.id || result.lead_id || null,
+        dealId: linkedLead?.sourceDeal?.id || null,
+        company: companyName || "Unknown company",
+        country: linkedLead?.originCountry || result.country || result.destination || null,
+        role,
+        product: linkedLead?.product?.name || result.product || parsed.product || null,
+        confidenceScore: Number((confidence * 100).toFixed(2)),
+        rankingScore: Number((Math.max(0.01, Math.min(0.99, ranking)) * 100).toFixed(2)),
+        sourceName: result.source_name,
+        sourceUrl: result.source_url,
+        contactName: firstContact?.fullName || result.contact_name || null,
+        contactEmail: firstContact?.email || null,
+        contactPhone: firstContact?.phone || null,
+        aiExplanation: buildAiExplanation(result, role),
+        nextAction: buildNextAction(result, role),
+        whyMatched: getWhyMatched({
+          roleRelevance,
+          countryMatched,
+          productMatched,
+          enrichmentScore,
+          sourceQuality,
+          confidence,
+          repeatedSignals,
+          multiSource
+        }),
+        status: linkedLead?.status || "UNSAVED",
+        createdAt: freshnessDate.toISOString(),
+        rawResult: result
+      };
+    })
+    .filter((item): item is LeadDiscoveryItem => Boolean(item));
 
   discoveryLeads.sort((a, b) => {
     const stageDelta = (b.discoveryStage === "strong" ? 1 : 0) - (a.discoveryStage === "strong" ? 1 : 0);
